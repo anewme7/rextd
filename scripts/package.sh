@@ -28,13 +28,13 @@ stage=$(mktemp -d "$output/.rex-td-package.XXXXXX")
 trap 'rm -r "$stage"' EXIT
 mkdir -p "$stage/$name/rex"
 go build -trimpath -ldflags "-X main.version=$version" -o "$stage/$name/rextd" ./cmd/rex-td-preview
-cp README.md "$stage/$name/"
-mkdir -p "$stage/$name/docs/screenshots"
+cp README.md README.zh-CN.md "$stage/$name/"
+mkdir -p "$stage/$name/docs"
 cp docs/user-guide.md "$stage/$name/docs/"
-cp docs/screenshots/before.png docs/screenshots/after.png "$stage/$name/docs/screenshots/"
+cp -R docs/screenshots "$stage/$name/docs/"
 cp rex/action.lua rex/init.example.lua rex/metrics.lua rex/claude-statusline.example.json "$stage/$name/rex/"
 mkdir -p "$stage/$name/rex/agent-details"
-cp rex/palette.lua "$stage/$name/rex/"
+cp rex/palette.lua rex/current-task.lua scripts/launch.sh "$stage/$name/rex/"
 cp rex/agent-details/action.lua rex/agent-details/read.mjs "$stage/$name/rex/agent-details/"
 go list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}}{{"\t"}}{{.Dir}}{{end}}{{end}}' ./cmd/rex-td-preview > "$stage/modules"
 sort -u "$stage/modules" | while IFS="$(printf '\t')" read -r module source; do

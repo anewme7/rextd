@@ -91,7 +91,7 @@ func TestLanguageShortcutKeepsTaskSelectionAndUserText(t *testing.T) {
 	m.focusPreview, m.grouping, m.attention = true, byAgent, true
 	m.Update(tea.WindowSizeMsg{Width: 78, Height: 32})
 	m.Update(shiftL)
-	if view = ansi.Strip(m.View()); !strings.Contains(view, "By agent") {
+	if view = ansi.Strip(m.View()); !strings.Contains(view, "Status") || !strings.Contains(view, "Session") || !strings.Contains(view, "Agent") || !strings.Contains(view, "Host") {
 		t.Fatalf("English task board should translate the grouping control:\n%s", view)
 	}
 

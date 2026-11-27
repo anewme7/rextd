@@ -1,211 +1,139 @@
 # rextd
 
-rextd is a task sidebar for Rex. Keep a local task list, see which agents need your attention, and jump back to the right pane. Organize linked sessions and panes under each task, and group Attention by Rex session, agent, or host.
+English · [简体中文](README.zh-CN.md)
 
-[Read the user guide](docs/user-guide.md) to install rextd and link your first task to a Rex pane.
+rextd is a task sidebar for [Rex](https://www.superlogical.com/rex). When several coding agents are working at once, pick a task to see its next step, which panes belong to it, and which one needs a reply. Open the waiting pane to answer, then return to the same task.
 
-## Before and after
+![Rex task board in dark mode. “Add CSV export to reports” has two linked sessions. The export agent is waiting for an answer while its tests are running.](docs/screenshots/v0.0.2/board-en.png)
 
-**Before rextd.** Read the error or approval request in each Rex pane.
-
-![Two separate Rex panes showing a Claude Code import error and a Codex approval request](docs/screenshots/before.png)
-
-**With rextd.** Attention groups the same panes by agent, shows their status, and gives you a shortcut back to the pane.
-
-![The same Rex panes beside the English rextd sidebar, showing grouped alerts and the jump shortcut](docs/screenshots/after.png)
-
-The comparison uses fictional pane names, tasks, hosts, and usage figures in an isolated Rex session.
+The screenshots follow one sample task in **v0.0.2**. Try the same board with `./rextd --demo`. [Download v0.0.2](https://github.com/anewme7/rextd/releases/tag/v0.0.2) · [User guide](docs/user-guide.md)
 
 ## Install and open the sidebar
 
-Download the archive for your platform and its `.sha256` file. The current release is **v0.0.1**. [GitHub Releases](https://github.com/anewme7/rextd/releases)
+### Single machine
 
-The current packages start in English. Press Shift+L in the sidebar to switch to Simplified Chinese.
+Install Rex on your machine, open a Rex terminal and run the block for your platform below. [Rex installation](https://www.superlogical.com/rex/docs/installation)
 
-For example, on Apple Silicon:
+You'll need the `rex` command for live status and pane navigation. The release includes SQLite and runs without a Go toolchain.
 
-```sh
-curl -fLO https://github.com/anewme7/rextd/releases/latest/download/rex-td_darwin_arm64.tar.gz
-curl -fLO https://github.com/anewme7/rextd/releases/latest/download/rex-td_darwin_arm64.tar.gz.sha256
-shasum -a 256 -c rex-td_darwin_arm64.tar.gz.sha256
-tar -xzf rex-td_darwin_arm64.tar.gz
-cd rex-td_darwin_arm64
-```
-
-On Linux x86-64, download `rex-td_linux_amd64.tar.gz` and its checksum, then run:
+<details open>
+<summary><strong>macOS · Apple Silicon</strong></summary>
 
 ```sh
-sha256sum -c rex-td_linux_amd64.tar.gz.sha256
-tar -xzf rex-td_linux_amd64.tar.gz
-cd rex-td_linux_amd64
+release=https://github.com/anewme7/rextd/releases/download/v0.0.2
+pkg=rex-td_darwin_arm64
+dest="$HOME/.local/opt/rextd/v0.0.2"
+mkdir -p "$dest" && cd "$dest" &&
+  curl -fLO "$release/$pkg.tar.gz" &&
+  curl -fLO "$release/$pkg.tar.gz.sha256" &&
+  shasum -a 256 -c "$pkg.tar.gz.sha256" &&
+  tar -xzf "$pkg.tar.gz" &&
+  cd "$pkg"
 ```
 
-From the extracted directory, run this inside an open Rex pane:
+</details>
+
+<details>
+<summary><strong>Linux · x86-64</strong></summary>
 
 ```sh
-rex run --split=right --ratio 35 --shell=none --label rextd -- "$PWD/rextd"
+release=https://github.com/anewme7/rextd/releases/download/v0.0.2
+pkg=rex-td_linux_amd64
+dest="$HOME/.local/opt/rextd/v0.0.2"
+mkdir -p "$dest" && cd "$dest" &&
+  curl -fLO "$release/$pkg.tar.gz" &&
+  curl -fLO "$release/$pkg.tar.gz.sha256" &&
+  sha256sum -c "$pkg.tar.gz.sha256" &&
+  tar -xzf "$pkg.tar.gz" &&
+  cd "$pkg"
 ```
 
-The packaged binary needs Rex with its CLI on `PATH` for live pane status and jumps. SQLite is bundled. Go and a compiler are needed only to build from source.
+</details>
 
-### Try the demo
-
-Run `./rextd --demo` from the extracted directory, or add `--demo` to the end of the Rex launch command above. Press Tab to see the sample Attention list. Press Right to inspect a task or pane, and `q` to exit. The Go demo keeps its sample data in memory.
-
-### Try from a source checkout
-
-Use Go 1.23 or later. On macOS, enable CGO and install the Xcode command line tools to compile native CPU sampling.
+After the checksum reports `OK`, run `./rextd --version` in the same shell. It should print `rextd v0.0.2`. Try the sample tasks before opening your own board. Press `n` to see what needs a reply, Esc to go back, and `q` to quit. The demo keeps its data in memory.
 
 ```sh
-git clone https://github.com/anewme7/rextd.git
-cd rextd
-mkdir -p bin
-go build -o ./bin/rextd ./cmd/rex-td-preview
-rex run --split=right --ratio 35 --shell=none --label rextd -- "$PWD/bin/rextd"
+./rextd --demo --lang en
 ```
 
-To use the command palette with a source build, [build and extract an archive](#build-an-archive). The archive keeps the binary and Lua actions together.
+To open your own board alongside your current Rex pane, run this from the same directory. Press **Shift+L** to switch between English and Simplified Chinese at any time.
 
-For a quick English demo outside Rex, run `go run ./cmd/rex-td-preview --demo --lang en`.
+```sh
+rex run --split=right --ratio 35 --shell=none --label rextd -- "$PWD/rextd" --lang en
+```
 
-### Switch languages
+## Use one board across hosts
 
-Press **Shift+L** in the sidebar to switch between English and Simplified Chinese without leaving your current view. Lowercase `l` links panes on the Attention tab.
+Suppose the board runs on your Mac and a coding agent runs on a Linux machine called `build`. Install rextd on the Mac using the steps above. The Linux machine needs Rex Server and your agent. The Mac keeps the task database. [Install Rex Server on Linux](https://www.superlogical.com/rex/docs/linux/installation)
 
-Start in Chinese with `./rextd --lang zh` or in English with `./rextd --lang en`. Append the flag after the executable when launching through Rex. For direct launches, `REX_TD_LANG=zh` sets the default to Chinese and an explicit `--lang` flag takes precedence. Task titles, notes, and live pane names stay as entered.
+1. On the Mac, register the Linux server. If you already have SSH access, replace `alice@build.example.com` with your SSH login and address. If the server is already listed in Rex, skip the first command. Look for `reachable` in the check output. [Rex remote access](https://www.superlogical.com/rex/docs/linux/remote-access)
 
-## Use the sidebar
-
-### Create a task and link a pane
-
-1. Open **Tasks (任务)** and press `+`. Enter a title and press Enter to save it.
-2. Select the task. Press Right to expand it and Right again to see its details, or press `o` to open details directly.
-3. In details, press `l` to choose a Rex pane and Enter to link it. Select a linked pane and press Enter to jump to it.
-
-Click a task's checkbox or press `x` to mark it done or reopen it. Press `m` to reorder, cancel, and archive tasks, edit the next step, or add subtasks. Press Shift+A to see archived tasks and `/` to find a task.
-
-### Review agent activity
-
-**Attention (需要处理)** shows approvals, questions, sign-ins, errors, and completed turns that need review. Use `v` to group panes by session, agent, or host. Press Right on a pane to see its reported activity and next action, or Enter to jump straight to it.
-
-In pane details, press `m` for session metadata or Enter to jump. For provider setup, see [Agent session details](#agent-session-details).
-
-Press `y` or click **Mark seen** to clear a reviewed completion from Attention. Press `a` in Attention to show all panes, then open the pane again to undo the mark. New activity can bring the reminder back. Approvals and task checkboxes are independent of seen marks.
-
-### Review suggested tasks
-
-In **Attention**, open a Codex or Claude Code pane's details. Press `d` to discover a candidate now, or `w` to toggle watching the pane. Watched panes use the existing Rex status updates to suggest work when there is an active status and a usable title. The title can come from the agent, a named pane, or a named window containing a single agent.
-
-In **Tasks**, select **Candidates** below the task list and press Enter to expand it. Select a candidate and press Enter to review its source and change the title if needed. Press Enter again to save the task and its pane link together. Press `i` on a candidate to ignore the topic. The sidebar remembers which panes you watch and which topics you ignored.
-
-### Groups, mouse, and resources
-
-- **Groups** organize Attention by Session, Agent, or Host. Press `v` to switch. Host view nests sessions under each host. Press `c` to fold or open the current group, or Shift+C for the whole host. The Tasks tab keeps tasks at the top level, with linked sessions inside each task. Pinned items appear first.
-- **Mouse and touch** can switch tabs, change grouping or alert scope, fold group headers, select a row, expand a task by its arrow, and use the bottom shortcuts. Use the scroll wheel to move through list rows. Touch requires a Rex client that forwards taps as terminal mouse events.
-- **Resources** shows numbered hosts, CPU percentages, and the count of panes needing attention. Each provider shows its next reset and the used percentage for each quota window. A dash marks an unavailable reading. Click the resources prompt or press `f` to open that section. The host details also show session and window counts. Resource sampling stops when you close this section. Press Esc to return to the list.
-
-| Key | Action |
-| --- | --- |
-| `+` | Create a task |
-| Tab | Switch between Tasks and Attention |
-| `v` / `a` | Switch grouping / toggle all panes in Attention |
-| `c` / `Shift+C` | Fold or open the current group / the whole host in Host view |
-| Up / Down or `k` / `j` | Move the selection |
-| Right / `o` | Expand a task or open an expanded task's details / open details directly |
-| Enter | Jump to a linked pane or choose one from task details |
-| `x` / `m` | Mark a task done or reopen it / open the task menu |
-| `y` | Mark a completed pane result as seen or undo the mark |
-| `/` / Shift+A | Search tasks / open the archive |
-| `l` | Pick a pane from task details, or link or unlink the highlighted pane in Attention |
-| Shift+L | Switch between English and Simplified Chinese in the bilingual build |
-| Space | Show the selected task or pane status |
-| `p` | Pin or unpin the selected task or pane |
-| `b` / `z` | Change the task title accent / cycle the three display densities |
-| `t` | Change the task type in task details |
-| `f` / `g` | Move focus between resources and the list / clear the host filter |
-| `?` / `q` | Show help / quit |
-
-Task pins stay in the task database. Attention pins last for the current sidebar run. Rex reports active pane titles and status. Task membership follows the links you make in the sidebar.
-
-## Optional integrations
-
-| Feature | Setup |
-| --- | --- |
-| Rex hosts and pane status | Open the sidebar inside Rex. Connected hosts appear automatically. |
-| Cross-host jumps | Connect the Rex app to both servers, use a unique Rex client label, and enable Rex Remote Control for tab switches. |
-| Local CPU | The macOS build reads Mach counters. The Linux build reads `/proc/stat`. |
-| Remote CPU | Enable the CPU action on each server you want to monitor. |
-| Claude Code usage | Connect Claude Code's status line. |
-| Codex usage | Put `codex` on `PATH` and sign in. The sidebar reads usage from the local Codex App Server. |
-| Rex command palette | Load the bundled Lua actions to open the board, find a task, capture a pane, or filter by host. |
-
-### Add rextd to the Rex command palette
-
-Copy the block from [rex/init.example.lua](rex/init.example.lua) into your Rex `init.lua`. Set `rextd_root` to the absolute path of the extracted directory containing the `rextd` binary and the `rex/` folder. Run `rex config check` and `rex config reload` on that Rex server.
-
-On macOS, open the Rex command palette with **Shift+Command+P**. Search for **td** to find the rextd actions.
-
-- **Open Task Board** opens a sidebar beside your current pane or focuses the existing one.
-- **Find Task** finds an active task and jumps to a linked pane. The picker shows the host, agent, and status for multiple links. If the pane is unavailable, Find Task opens the task with its links and next step.
-- **Capture Current Pane** creates a task from the current pane or links it to an existing task.
-
-Use **Open Task Board** to return to the selected task after a jump. To jump across hosts, connect your Rex app to both hosts, give the client a unique label, and enable Rex Remote Control for tab switches.
-
-**Show Host 1** filters Attention in a rextd pane in the current window. Inside the sidebar, Alt+1 through Alt+9 select numbered hosts and Alt+0 shows all hosts.
-
-Set `rextd_language = "zh"` for Chinese action titles and new sidebars. If you use a custom `REX_TD_DATA_DIR` when starting rextd, set `rextd_data_dir` to that same absolute directory in the Rex config so the board and the palette share your task list.
-
-### Agent session details
-
-Press Right on an Attention row, then `m` to expand the Agent metadata. Claude Code matches a local session to the pane's foreground process with `claude agents`. For Codex, press `i` in pane details and enter the agent's session ID to verify and link it using the local Codex App Server.
-
-To make the same lookup available for a remote pane, uncomment the Agent details line in the Rex example config on that pane's host. Agent tools must be installed on the host with the pane.
-
-Claude Code's latest reply can be read with the optional bundled reader. Install Node.js, copy `rex/agent-details/read.mjs` to `~/.config/rex/rextd/agent-details/claude-reader/` on the pane's host, then run `npm install --save-exact @anthropic-ai/claude-agent-sdk@0.3.329` from that directory. Use the matching path under `$XDG_CONFIG_HOME` if you set it.
-
-### Enable remote CPU
-
-1. Copy [rex/metrics.lua](rex/metrics.lua) to the target Rex server.
-2. Add the following line to that server's Rex `init.lua`. Use the absolute path to the copied file. Rex normally reads `~/.config/rex/init.lua`, or `$XDG_CONFIG_HOME/rex/init.lua` when set. For a shared server, use the [service account's configuration](https://www.superlogical.com/rex/docs/linux/shared-server).
-
-   ```lua
-   dofile("/absolute/path/to/metrics.lua")
+   ```sh
+   rex hosts add build ssh://alice@build.example.com
+   rex hosts check build
    ```
 
-3. For a macOS server, copy the matching `rextd` binary to the server. Above the `dofile` line, set `rex_td_preview_binary = "/absolute/path/to/rextd"`. On Linux, the Lua action reads `/proc/stat` directly.
-4. On the target server, run `rex config check` and `rex config reload`. Reopen the sidebar to discover the action. Reachability and pane counts already work through Rex. [Rex server configuration](https://www.superlogical.com/rex/docs/customize/config)
+2. In the **same Rex app**, open a session on each server. On the Mac, go to **Settings → General → Client Info**, give the device a unique **Label** and enable **Remote Control**. Use a different label on each device you intend to jump from. [Rex settings](https://www.superlogical.com/rex/docs/reference/mac-settings#setting-client-info-label)
+3. Start the agent in a Rex pane on Linux. On the Mac board, press `n` for Alerts, then `a` to include working panes. Press `v` until the list is grouped by **Host**. Select the agent under **build**. Space previews the terminal, Esc returns to the row, and Enter takes you to the Linux pane. Use the Mac board tab to return, or use **td / Open Task Board** on the Mac after setting up the command palette below.
 
-To remove remote CPU collection, remove the lines you added to the server's `init.lua` and reload Rex on that server.
+Remote CPU readings are optional. Pane status and jumps work without the metrics action. [Remote CPU setup](docs/user-guide.md#enable-remote-cpu)
 
-### Enable Claude Code usage
+## Start a task and see its agent sessions
 
-Merge [rex/claude-statusline.example.json](rex/claude-statusline.example.json) into the settings for the Claude Code profile you want to display. Set its command to your executable's absolute path followed by `--claude-statusline`. If you already have a status-line script, forward a copy of its JSON input to that command and keep your script in place. Claude Code sends supported five-hour and weekly windows after the first response in a session. The sidebar replaces one local cache with the latest reading. [Claude Code status line](https://code.claude.com/docs/en/statusline)
+1. **Create the task.** Press `+`, type a title such as “Add CSV export to reports”, and press Enter. Select it and press `s` to put it **In progress**. Press `e` to record the next action, such as “Export only visible columns”.
+2. **Start the agent.** With the task selected, press **Shift+N** to open its Rex tab. Start your coding agent in that tab so rextd can link the new pane. On the board, select the task to see its sessions below. If a pane appears under **Unassigned**, select that row, press →, then choose the pane and confirm its task with Enter.
+3. **Check the work.** Press Enter on the task for its next action, linked sessions and subtasks. From the board you can also press → to select a session directly. Press Space to read its live terminal output, Esc to return to the selected row, or Enter to jump into the pane and type.
 
-If a local Claude Code pane reports that its weekly quota is exhausted, rextd uses that status to show 100% weekly usage until the reported reset. This works before Claude Code sends its first status-line usage reading.
+<img src="docs/screenshots/v0.0.2/detail-en.png" width="470" alt="Task details in a 47-column Rex pane. The next action is to export only visible columns. Two sessions are linked, and two of three steps are complete.">
+
+In a narrow pane, the next action stays above the session list. On an iPhone, swipe to read further down and tap a row to select it. Each Rex client can open its own board window.
+
+## Find the agent waiting for you
+
+Press `n` to open **Alerts**. In the example below, four panes need input and two have finished a turn. Selecting **CSV export** reveals the actual question, “Should the export include hidden columns?” On a live board, press Enter to answer in that pane.
+
+![Light-mode Alerts grouped by status. CSV export is selected, and its question about hidden columns appears beneath the list.](docs/screenshots/v0.0.2/alerts-en.png)
+
+| What you want to do | From the board or Alerts |
+| --- | --- |
+| See work by task state | `1` Now · `2` To Do · `3` Done · `4` Archive. Press `v` on the board to see all four sections together. |
+| Find a pane by host or agent | In Alerts, `v` cycles through Status, Session, Agent and Host. Press `a` to include all panes. |
+| Read earlier terminal output | Select a pane and press Space. Scroll back, press End to follow live output, or press Space again to return. |
+| Check a machine or a quota | Press `f` for Hosts, again for Usage, and once more to close. Esc also closes the drawer. |
+| Find other shortcuts | Press `?` in the sidebar. |
+
+## Add rextd to the Rex command palette
+
+Copy the settings from the [example configuration](rex/init.example.lua) into Rex's `init.lua`. Set `rextd_root` to the absolute path of the extracted folder containing both `rextd` and `rex/`. Check the config, then reload it on that server.
+
+```sh
+rex config check && rex config reload
+```
+
+On macOS, press **⌘⇧P** and search for **td**.
+
+| Command | When to use it |
+| --- | --- |
+| **td / Open Task Board** | After jumping into a pane, return to where you left off on this client's board. |
+| **td / Find Task…** | Search by title, including archived tasks. Open an archived task's details or jump to an active task's linked pane. |
+| **td / Capture Current Pane…** | Turn the pane you're in into a new task or attach it to an existing unarchived task. |
+| **td / Tasks** | Go straight to **Now**. The optional Raycast `td` shortcut also opens this page. |
+| **td / Show Host 1** | Open Alerts filtered to the first host. |
+
+If you start the sidebar with a custom `REX_TD_DATA_DIR`, set `rextd_data_dir` in Rex to the same absolute directory so the palette opens the same tasks. Set `rextd_language = "zh"` for Chinese palette entries. [Agent details, CPU and quota setup](docs/user-guide.md#optional-integrations)
 
 ## Data, updates, and removal
 
-Tasks, types, colors, pins, results, and pane links are stored in `~/.local/share/rex-td/tasks.sqlite3` by default. An absolute `REX_TD_DATA_DIR` takes priority over `$XDG_DATA_HOME/rex-td`, when set. Demo data lives in memory. CPU readings and live pane events stay out of the task database. Seen marks store a fingerprint and timestamp for each acknowledged pane.
+Tasks, next actions and pane links live in a local SQLite file on the machine running the board. The default is `~/.local/share/rex-td/tasks.sqlite3`. If set, `$XDG_DATA_HOME/rex-td` replaces the default directory. An absolute `REX_TD_DATA_DIR` takes precedence over both. Back up the database before upgrading. [Backup, update and removal instructions](docs/user-guide.md#back-up-update-or-remove)
 
-The database is local to the machine running rextd. Task notes, results, and linked pane names may contain private information. Use demo mode for shareable screenshots and keep your task database, runtime logs, and personal configuration out of commits and issue attachments.
+## Build from source
 
-Close the sidebar before copying its database for backup. To update, close the sidebar and extract the newer archive. If you use Rex actions, update `rextd_root` to the new directory and reload Rex. To uninstall, close the sidebar, remove the extracted program, and remove any optional Rex or Claude settings you added. Keep the data directory to use the saved tasks again.
-
-## Build an archive
-
-Run the following with a Go build environment for the target platform. Use a macOS build environment with CGO for macOS packages.
+With Go 1.24 or later, run the following in a Rex pane from the repository root. macOS also needs the Xcode command line tools and CGO enabled.
 
 ```sh
-sh scripts/package.sh ./release
+REX_TD_LANG=en ./scripts/preview.sh --demo
 ```
 
-The script writes a `rex-td_<os>_<arch>.tar.gz` archive and its SHA-256 file. The archive contains `rextd`, the README, the user guide, the screenshots, the Rex action and optional integration examples, and third-party notices.
-Set `REX_TD_VERSION` to the release tag when building a release archive. Use `rextd --version` to verify the build version.
+The preview binary is built at `~/dev/rextd/work/preview/rextd`. Omit `--demo` for a separate live board. On a machine with the managed installation, `--copy-prod-data` opens a disposable working copy of the production tasks. To build a local archive and its checksum, run `sh scripts/package.sh "$HOME/dev/rextd/work/preview/release-check"`.
 
-rextd is released under the [MIT License](LICENSE).
-
-## Tests
-
-```sh
-go test ./...
-```
+[MIT License](LICENSE)

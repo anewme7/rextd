@@ -145,7 +145,7 @@ func (m *model) editPaneAgent(msg tea.KeyMsg) tea.Cmd {
 		scene.editing = false
 		m.notice = ""
 	case tea.KeyEnter:
-		id := strings.TrimSpace(scene.input)
+		id := strings.TrimSpace(scene.input.value)
 		if id != "" && !agentIDPattern.MatchString(id) {
 			m.notice = m.text("请输入完整的会话 ID")
 			return nil
@@ -163,7 +163,7 @@ func (m *model) editPaneAgent(msg tea.KeyMsg) tea.Cmd {
 		scene.binding, scene.detail, scene.turn = agentBinding{}, agentDetail{}, rex.PaneTurn{}
 		return m.readPaneAgent("", false)
 	default:
-		scene.input = editTaskText(scene.input, msg)
+		scene.input.update(msg)
 	}
 	return nil
 }

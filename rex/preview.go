@@ -72,7 +72,7 @@ func (c Context) Inside() bool {
 }
 
 // watchHost keeps one connection and the most recent snapshot for this server.
-func (c Context) watchHost(ctx context.Context, host Host, logger *slog.Logger) (updates <-chan Snapshot, done <-chan struct{}) {
+func (c Context) watchHost(ctx context.Context, host Host, logger *slog.Logger, previews *TerminalPreviews) (updates <-chan Snapshot, done <-chan struct{}) {
 	output := make(chan Snapshot, 1)
 	finished := make(chan struct{})
 	go func() {
@@ -85,17 +85,17 @@ func (c Context) watchHost(ctx context.Context, host Host, logger *slog.Logger) 
 			}
 			output <- s
 		}
-		c.watch(ctx, host, logger.With("host", host.Label), send)
+		c.watch(ctx, host, logger.With("host", host.Label), previews, send)
 	}()
 	return output, finished
 }
 
-func (c Context) watch(ctx context.Context, host Host, logger *slog.Logger, send func(Snapshot)) {
+func (c Context) watch(ctx context.Context, host Host, logger *slog.Logger, previews *TerminalPreviews, send func(Snapshot)) {
 	delay := time.Second
 	failed := false
 	var latest Snapshot
 	for ctx.Err() == nil {
-		c.read(ctx, host, func(s Snapshot) {
+		c.read(ctx, host, previews, func(s Snapshot) {
 			if latest.State != Live && latest.State != Partial {
 				logger.Info("Rex status feed connected")
 			}
@@ -124,7 +124,7 @@ func (c Context) watch(ctx context.Context, host Host, logger *slog.Logger, send
 	}
 }
 
-func (c Context) read(ctx context.Context, host Host, publish func(Snapshot)) {
+func (c Context) read(ctx context.Context, host Host, previews *TerminalPreviews, publish func(Snapshot)) {
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
 	firstSnapshot := time.AfterFunc(15*time.Second, cancel)
@@ -132,6 +132,13 @@ func (c Context) read(ctx context.Context, host Host, publish func(Snapshot)) {
 	args := []string{"do", "--all", "--fail-fast", "-e", activityScript, "fleet=true"}
 	if host.Server == "" {
 		args = append(args, "sidebar_id="+c.SidebarID)
+	} else if previews != nil {
+		payload, _ := json.Marshal(map[string]any{
+			"fleet": true, "preview_path": previews.path, "preview_host": host.ID,
+		})
+		args = []string{"do", "--all", "--fail-fast", "-e",
+			ReadTerminalScreenLua + activityScript + watchTerminalPreviewLua, "--args", string(payload)}
+		defer previews.disconnected(host.ID)
 	}
 	cmd := host.command(child, args...)
 	cmd.WaitDelay = time.Second
@@ -147,6 +154,10 @@ func (c Context) read(ctx context.Context, host Host, publish func(Snapshot)) {
 	var last []Pane
 	for reader.Scan() {
 		raw := reader.Bytes()
+		if frame, ok := bytes.CutPrefix(raw, []byte("rextd-preview ")); ok && previews != nil {
+			previews.publish(host.ID, frame)
+			continue
+		}
 		if bytes.Equal(raw, previous) {
 			continue
 		}

@@ -35,7 +35,12 @@ func groupHeadingStyle(key groupKey) lipgloss.Style {
 
 func (m *model) View() string {
 	if m.focusPreview {
-		return m.focusView()
+		m.homePlacements = m.homePlacements[:0]
+		view := m.focusView()
+		if m.homeGraphics != nil {
+			view += homeFrame(m.width, m.height, m.homePlacements)
+		}
+		return view
 	}
 	w, h := m.width, m.height
 	m.mouseRows = nil
@@ -120,6 +125,8 @@ func (m *model) body(w, h int) []string {
 		}
 	case taskMenuPage:
 		screen = m.taskMenu(w)
+	case taskDeletePage:
+		screen = m.taskDeleteView(w)
 	case taskPickPage:
 		screen = m.taskPicker(w)
 	case linkPage:
@@ -131,10 +138,10 @@ func (m *model) body(w, h int) []string {
 	default:
 		switch {
 		case m.editing:
-			screen.lines = []string{accent.Render(m.text("新建任务")), "", clip(m.input+"▏", w), "", dim.Render(m.text("回车 保存  ·  Esc 取消"))}
+			screen.lines = []string{accent.Render(m.text("新建任务")), "", m.input.view(w), "", dim.Render(m.text("回车 保存  ·  Esc 取消"))}
 			if m.focusPreview && m.candidateDraft == nil {
 				title, prompt := m.editLabels()
-				screen.lines = []string{"", ink.Render(title), "", dim.Render(prompt), clip(m.input+"▏", w)}
+				screen.lines = []string{"", ink.Render(title), "", dim.Render(prompt), m.input.view(w)}
 				if m.notice != "" {
 					screen.lines = append(screen.lines, dim.Render(m.notice))
 				}
@@ -161,6 +168,9 @@ func (m *model) body(w, h int) []string {
 	if m.page == scenePage {
 		m.scene.offset = clamp(m.scene.offset, 0, max(0, len(screen.lines)-h))
 		offset = m.scene.offset
+	} else if m.page == helpPage {
+		m.helpOffset = clamp(m.helpOffset, 0, max(0, len(screen.lines)-h))
+		offset = m.helpOffset
 	}
 	limit := min(offset+h, len(screen.lines))
 	if len(screen.hits) != 0 {
@@ -287,7 +297,8 @@ func (m *model) taskRow(i int, w int) []string {
 
 func (m *model) taskRowWithProgress(i, w int, progress string) []string {
 	t := m.tasks[i]
-	here := i == m.taskSelection && !m.onCandidates()
+	home := m.focusPreview && m.page == listPage && !m.attention && !m.archivedView
+	here := i == m.taskSelection && !m.onCandidates() && (!home || (!m.boardSuggest && m.boardPane == (paneIdentity{})))
 	caret, marker, pin := " ", "▸ ", ""
 	if here && m.focus == 0 {
 		caret = "›"
@@ -299,6 +310,17 @@ func (m *model) taskRowWithProgress(i, w int, progress string) []string {
 		pin = "★ "
 	}
 	right := m.text(stateLabels[t.state])
+	if home && t.state == working {
+		status := m.boardStatus(t)
+		switch {
+		case status.waiting > 0:
+			right = fmt.Sprintf(m.text("%d 个等你"), status.waiting)
+		case status.running:
+			right = m.text("在跑")
+		case status.idle > 0 && status.idle == status.total:
+			right = fmt.Sprintf(m.text("%d 个会话 · 都空闲"), status.idle)
+		}
+	}
 	if len(t.steps) > 0 && !(here && m.peek) && (!m.focusPreview || m.expanded[t]) {
 		right = fmt.Sprintf("%d/%d", t.completed, len(t.steps))
 	}
@@ -333,6 +355,9 @@ func (m *model) taskRowWithProgress(i, w int, progress string) []string {
 	}
 	lines := []string{line}
 	if m.focusPreview {
+		if home && (t.state == working || !m.expanded[t]) {
+			return lines
+		}
 		if m.expanded[t] {
 			lines = append(lines, m.focusSummary(t, w)...)
 		} else if m.density == 2 {
@@ -424,11 +449,7 @@ func (m *model) paneRow(i, w, depth int, group groupKey) []string {
 	}
 	location := m.paneLocation(p)
 	if i == m.paneSelection && m.peek {
-		detail := m.sampleText(p.Message)
-		if detail == "" {
-			detail = location
-		}
-		return append(lines, dim.Render(clip("    "+strings.Join(nonEmpty(m.text("状态 ")+m.text(name), detail), " · "), w)))
+		return append(lines, dim.Render(clip("    "+m.paneStatusPreview(p, state), w)))
 	}
 	if depth > 0 {
 		location = appName(p.App)
@@ -493,26 +514,47 @@ func (m *model) details(w int) ([]string, int) {
 }
 
 func (m *model) help(w int) []string {
-	return []string{
-		accent.Render(m.text("rextd · 帮助")), "",
-		clip(m.text("+ 新建    ↑↓ 移动    Tab 切换页签"), w),
-		clip(m.text("→ 展开／详情    ← 返回    空格 看状态"), w),
-		clip(m.text("p 置顶    b 标题色    t 类型（详情）"), w),
-		clip(m.text("Shift+L 切换中英文"), w),
-		clip(m.text("z 切换三档视图"), w),
-		clip(m.text("x 勾选／重开    m 更多    A 归档"), w),
-		clip(m.text("v 切换分组    c 折叠／展开组"), w),
-		clip(m.text("Shift+c 在按主机视图折叠主机"), w),
-		clip(m.text("a 查看全部窗格／仅提醒"), w),
-		clip(m.text("f 或点标题 查看机器／额度明细"), w),
-		clip(m.text("机器区回车 筛选    g 全部机器"), w),
-		clip(m.text("Alt+1 到 9 筛选主机    Alt+0 全部机器"), w),
-		clip(m.text("窗格回车 跳转    l 关联选中任务"), w),
-		clip(m.text("窗格详情 d 发现 · w 观察 · y 已看"), w),
-		clip(m.text("o 详情    n 需要处理    q 退出"), w),
-		clip(m.text("点击页签、组标题或底栏操作"), w),
-		"", dim.Render(clip(m.storageLabel(), w)),
+	groups := [][]string{
+		{"任务",
+			"+ 新建 · / 搜索 · 4 或 A 查看归档",
+			"s 切换状态 · e 编辑下一步 · N 以任务名开 Rex 标签",
+			"x 完成或重开 · m 任务菜单 · p 置顶或取消置顶",
+			"在任务菜单选择删除，再按 y 确认"},
+		{"关联会话",
+			"Enter 跳到窗格 · → 看状态和详情 · 空格 预览终端",
+			"在预览中滚动查看前文，空格或 Esc 返回，Enter 进入窗格",
+			"在任务详情选中空闲且未关联的会话，按 Enter 关联",
+			"m 移到其他任务或移出任务",
+			"在任务详情选中不可用会话，按 u 解除关联",
+			"在「还有 N 个会话」行按 Enter 展开或收起",
+			"在待处理页按 v 切换按状态／会话／工具／主机分组，a 切换待看与全部"},
+		{"未归类",
+			"选中未归类行后，下方直接显示未归类会话，按 → 或 Enter 进入",
+			"选中会话后，空格预览，Enter 选择任务并归入"},
+		{"全局",
+			"1/2/3/4 或 Tab 切换现在、待办、已完成、归档 · v 切换分页与总览 · n 查看待处理",
+			"↑↓ 选任务 · → 选会话 · Enter 看详情",
+			"f 切换机器与额度 · Shift+L 切换语言",
+			"? 帮助 · Esc 返回 · q 退出"},
 	}
+	lines := []string{accent.Render(m.text("rextd · 帮助"))}
+	for _, group := range groups {
+		lines = append(lines, "", ink.Render(m.text(group[0])))
+		for _, line := range group[1:] {
+			for _, part := range strings.Split(ansi.Wrap(m.text(line), w-2, ""), "\n") {
+				lines = append(lines, "  "+part)
+			}
+		}
+	}
+	return lines
+}
+
+func (m *model) paneStatusPreview(p rex.Pane, status string) string {
+	detail := m.sampleText(p.Message)
+	if detail == "" {
+		detail = m.paneLocation(p)
+	}
+	return strings.Join(nonEmpty(m.text("状态 ")+m.text(statusText(status)), detail), " · ")
 }
 
 func (m *model) summary(w int) string {
@@ -577,6 +619,9 @@ func (m *model) hints(width int) string {
 		}
 		return renderShortcuts(width, [][2]string{{"↵", m.text("跳转")}, {"d", m.text("发现")}, {"w", watch}, {"Esc", m.text("返回")}})
 	}
+	if m.page == helpPage {
+		return renderShortcuts(width, [][2]string{{"↑↓", m.text("滚动")}, {"Esc", m.text("返回")}})
+	}
 	if m.page != listPage {
 		return accent.Render("Esc") + m.text(" 返回   ") + dim.Render(m.text("q 退出"))
 	}
@@ -597,6 +642,9 @@ func (m *model) hints(width int) string {
 
 func (m *model) listShortcuts(width int) string {
 	shortcuts := [][2]string{{"→", m.text("详情")}, {"↵", m.text("跳转")}, {m.text("空格"), m.text("状态")}, {"p", m.text("置顶")}}
+	if m.focusPreview && m.attention {
+		shortcuts[2][1] = m.text("预览")
+	}
 	return renderShortcuts(width, shortcuts)
 }
 
@@ -635,7 +683,7 @@ func statusText(s string) string {
 	case "waiting":
 		return "等待"
 	case "done":
-		return "待验收"
+		return "本轮结束"
 	case "offline":
 		return "失联"
 	default:
@@ -650,11 +698,11 @@ func (m *model) status(s string) string {
 
 func statusColor(s string) lipgloss.Style {
 	switch s {
-	case "受阻", "出错":
+	case "出错":
 		return failure
 	case "待批准", "待回答", "需登录", "等待":
 		return warn
-	case "完成", "待验收":
+	case "完成", "已完成", "本轮结束":
 		return success
 	case "进行中":
 		return accent

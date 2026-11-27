@@ -232,7 +232,7 @@ func withCodexRPC(parent context.Context, args []string, read func(codexCall) er
 		return nil, errors.New("Codex App Server did not respond")
 	}
 	if _, err := call("initialize", map[string]any{"clientInfo": map[string]string{
-		"name": "rex_td", "title": "rex-td", "version": "0.0.1",
+		"name": "rex_td", "title": "rex-td", "version": strings.TrimPrefix(version, "v"),
 	}}); err != nil {
 		return err
 	}

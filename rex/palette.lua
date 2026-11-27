@@ -2,11 +2,12 @@ local home = os.getenv("HOME")
 local runtime = rextd_root or (home .. "/.local/opt/rextd")
 local binary = runtime .. "/rextd"
 local language = rextd_language or os.getenv("REX_TD_LANG")
-local label = "rextd"
 local terminal = "com.superlogical.terminal"
 local data = rextd_data_dir or os.getenv("REX_TD_DATA_DIR")
+local generic_dirs = rextd_generic_dirs or os.getenv("REX_TD_GENERIC_DIRS")
 local environment = { "/usr/bin/env", "REX_TD_LANG=" .. (language == "zh" and "zh" or "en") }
 if data then environment[#environment + 1] = "REX_TD_DATA_DIR=" .. data end
+if generic_dirs then environment[#environment + 1] = "REX_TD_GENERIC_DIRS=" .. generic_dirs end
 
 local function text(en, zh)
   return language == "zh" and zh or en
@@ -21,7 +22,7 @@ local function command(...)
 end
 
 local states = {
-  ["To do"] = "待做", ["In progress"] = "进行中", Blocked = "受阻", Done = "完成", Cancelled = "取消",
+  ["To do"] = "待做", ["In progress"] = "进行中", Paused = "暂缓", Done = "已完成", Cancelled = "已取消",
 }
 
 local function must(value, problem)
@@ -55,25 +56,6 @@ local function view_of(session_id)
   return rex.call("session.view", { session_id = session_id })
 end
 
-local function find_in(view)
-  if not view then return nil end
-  for _, window in ipairs(view.windows or {}) do
-    for _, layer in ipairs(window.layers or {}) do
-      for _, block in ipairs(layer.blocks or {}) do
-        if block.label == label and block.creator_name == terminal then
-          local status = rex.call(terminal .. ".process", { session_id = view.session_id, block_id = block.block_id, args = {} })
-          -- On macOS Rex tracks login as the child of a directly launched terminal.
-          if status and not status.last_exit and
-              ((status.foreground and status.foreground.path == binary) or
-               (status.child and (status.child.path == binary or status.child.path == "/usr/bin/login"))) then
-            return { session_id = view.session_id, window_id = window.window_id, block_id = block.block_id }
-          end
-        end
-      end
-    end
-  end
-end
-
 local function focus(ctx, target, select_window)
   local origin = by_block(view_of(ctx.session_id), ctx.block_id)
   must(rex.call("session.focus_block", { session_id = target.session_id, block_id = target.block_id }))
@@ -83,37 +65,25 @@ local function focus(ctx, target, select_window)
   return target
 end
 
-local function open_board(ctx, args)
-  local location = find_in(view_of(ctx.session_id))
-  if not location then
-    local sessions = must(rex.call("session.list", {}))
-    for _, session in ipairs(sessions.sessions or {}) do
-      if session.session_id ~= ctx.session_id then
-        location = find_in(view_of(session.session_id))
-        if location then break end
-      end
-    end
+local function open_board(client)
+  return must(rex.invoke("rextd_current_task", { restore_location = true, attention_client = client }))
+end
+
+local function client_scope(ctx)
+  if not ctx.client_id then return "" end
+  local connected = must(rex.call("client.list", { kinds = { "app" } }))
+  for _, app in ipairs(connected.clients or {}) do
+    if app.client_id == ctx.client_id then return ctx.client_id end
   end
-  if location then return focus(ctx, location, args and args.select_window) end
-  if not ctx.session_id or not ctx.block_id then error(text("Run this action from a Rex pane", "请在 Rex 窗格中运行"), 0) end
-  local opened = must(rex.call("session.new_split", {
-    session_id = ctx.session_id, anchor_id = ctx.block_id,
-    direction = "horizontal", side = "after", ratio = 0.65, focus = true,
-    layout = {
-      block = {
-        flavor = terminal .. ".shell", label = label,
-        options = { shell = "none", command = command() },
-      },
-    },
-  }))
-  return { block_id = opened.block_ids[1], session_id = ctx.session_id }
+  return ""
 end
 
 local function task_items(tasks)
   local items, indexed = {}, {}
   for _, task in ipairs(tasks) do
     local id = tostring(task.id)
-    items[#items + 1] = { id = id, title = task.title, subtitle = text(task.state, states[task.state] or task.state),
+    local state = task.state == "Blocked" and "Paused" or task.state
+    items[#items + 1] = { id = id, title = task.title, subtitle = task.archived and text("Archived", "已归档") or text(state, states[state] or state),
       detail = text(tostring(#task.panes) .. (#task.panes == 1 and " pane" or " panes"), #task.panes .. " 个窗格"), icon = "document" }
     indexed[id] = task
   end
@@ -125,45 +95,47 @@ local reasons = {
   pane_closed = text("Pane closed", "窗格已关闭"),
 }
 
-local function remember(task, target, reason)
-  store("resume", { task_id = task.id, pane = target, reason = reason })
+local function remember(scope, task, target, reason)
+  store("resume", { client = scope, task_id = task.id, pane = target, reason = reason })
 end
 
-local function show_task(ctx, args, task, target, reason)
-  remember(task, target, reason)
-  local opened = open_board(ctx, args)
+local function show_task(scope, task, target, reason)
+  remember(scope, task, target, reason)
+  local opened = open_board(scope ~= "" and scope or nil)
   opened.task_id = task.id
   opened.unavailable = reason
   return opened
 end
 
 local function find_task(ctx, args)
-  local items, indexed = task_items(store("list"))
+  local items, indexed = task_items(store("find-list"))
   if args.inspect and not args.task_id then return { items = items } end
-  if #items == 0 then return open_board(ctx, args) end
+  if #items == 0 then return open_board() end
   local id = args.task_id and tostring(args.task_id) or rex.ui.pick{
     title = text("Find Task", "查找任务"), placeholder = text("Task name", "任务名称"), items = items,
   }
   if not id then return end
   local task = indexed[id]
   if not task then error(text("The task is no longer available", "任务已不存在，请重新查找"), 0) end
-  local targets = store("targets", { task_id = task.id })
+  local scope = client_scope(ctx)
+  if task.archived and not args.inspect then return show_task(scope, task) end
+  local targets = store("targets", { client = scope, task_id = task.id }, 21)
   for _, target in ipairs(targets) do
     local status = reasons[target.unavailable] or target.status
     if status and status ~= "" then target.location = target.location .. " · " .. status end
   end
   if args.inspect then return { title = task.title, targets = targets } end
-  if #targets == 0 then return show_task(ctx, args, task, nil, args.block_id and "link_missing" or nil) end
+  if #targets == 0 then return show_task(scope, task, nil, args.block_id and "link_missing" or nil) end
 
   local chosen
   if args.block_id then
     for _, target in ipairs(targets) do
       if target.block_id == args.block_id and (not args.host_id or target.host_id == args.host_id) then
-        if chosen then return show_task(ctx, args, task, nil, "link_missing") end
+        if chosen then return show_task(scope, task, nil, "link_missing") end
         chosen = target
       end
     end
-    if not chosen then return show_task(ctx, args, task, nil, "link_missing") end
+    if not chosen then return show_task(scope, task, nil, "link_missing") end
   elseif #targets == 1 then
     chosen = targets[1]
   else
@@ -176,21 +148,21 @@ local function find_task(ctx, args)
     chosen = targets[tonumber(selection)]
   end
   if not chosen then return end
-  if chosen.unavailable then return show_task(ctx, args, task, chosen, chosen.unavailable) end
+  if chosen.unavailable then return show_task(scope, task, chosen, chosen.unavailable) end
 
-  remember(task, chosen)
+  remember(scope, task, chosen)
   local result
   if chosen.host_id == "local" then
     local ok, focused = pcall(focus, ctx, chosen, args.select_window)
-    if not ok then return show_task(ctx, args, task, chosen, "jump_failed") end
+    if not ok then return show_task(scope, task, chosen, "jump_failed") end
     result = focused
   else
     local ok, jumped = pcall(store, "jump", {
       task_id = task.id, pane = chosen,
       origin_session = ctx.session_id, origin_block = ctx.block_id, client = ctx.client_id,
-    }, 15)
-    if not ok then return show_task(ctx, args, task, chosen, "jump_failed") end
-    if jumped.unavailable then return show_task(ctx, args, task, chosen, jumped.unavailable) end
+    }, 24)
+    if not ok then return show_task(scope, task, chosen, "jump_failed") end
+    if jumped.unavailable then return show_task(scope, task, chosen, jumped.unavailable) end
     result = jumped
   end
   result.task_id = task.id
@@ -200,7 +172,7 @@ end
 local function current_target(ctx)
   local view = view_of(ctx.session_id)
   local window, block = by_block(view, ctx.block_id)
-  if not window or block.creator_name ~= terminal or block.label == label then
+  if not window or block.creator_name ~= terminal or (block.label == "rextd" or (block.label or ""):match("^rextd · Home/")) then
     error(text("Run this action from the pane you want to link", "请在要收录的工作窗格里运行"), 0)
   end
   local report = rex.call(terminal .. ".program_status", { session_id = ctx.session_id, block_id = ctx.block_id, args = {} })
@@ -244,9 +216,9 @@ rex.action{
   title = text("td / Open Task Board", "td / 打开任务看板"),
   category = "td",
   keywords = "rextd tasks board focus 任务 看板 回到侧栏",
-  description = text("Open or focus the task board.", "打开或聚焦右侧任务看板。"),
+  description = text("Return to the task board for this client.", "打开此客户端的任务看板。"),
   args = { select_window = "boolean?" },
-  run = open_board,
+  run = function() return open_board() end,
 }
 
 rex.action{

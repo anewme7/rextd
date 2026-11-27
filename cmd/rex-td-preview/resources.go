@@ -111,6 +111,9 @@ func (m *model) hostRows(width, limit int, exact bool) []string {
 		if m.rexContext.Inside() {
 			return []string{dim.Render(m.text("连接中…"))}
 		}
+		if m.rexContext.SidebarID != "" {
+			return []string{dim.Render(m.text("Rex 未连接"))}
+		}
 		return []string{dim.Render(m.text("需在 Rex 中启动"))}
 	}
 	start := min(m.hostOffset, max(0, len(m.feed.Hosts)-limit))
@@ -281,6 +284,136 @@ func (m *model) quotaRows(sources []quotaSource, now time.Time, standard bool, w
 			value = " " + value
 		}
 		rows = append(rows, pair(source.name, dim.Render(header), width), clip(style.Render(value), width))
+	}
+	return rows
+}
+
+// homeResourcesDrawer renders Hosts and Usage quietly at the bottom of the
+// Home / Sessions screen without switching the main page.
+func (m *model) homeResourcesDrawer(w int, tier homeTier, height int) []string {
+	margin := m.homeMargin()
+	pad := strings.Repeat(" ", margin)
+	gridW := min(max(20, w-margin*2), max(20, homeGridWidth(w, tier)-margin*2))
+	if tier != homeFull {
+		gridW = max(20, w-margin*2)
+	}
+	leftStyle, rightStyle := homeMuted, homeMuted
+	if m.focus == 1 {
+		leftStyle = homeBlue.Bold(true)
+	}
+	if m.focus == 2 {
+		rightStyle = homeBlue.Bold(true)
+	}
+	now := time.Now()
+	limit := resourceHeight(height)
+	sources := m.quotaSources(now)
+	start := min(m.quotaOffset, max(0, len(sources)-limit/2))
+	sources = sources[start:min(start+limit/2, len(sources))]
+	standardPeriods := standardQuotaPeriods(sources)
+
+	leftTitle := leftStyle.Render(m.text("机器")) + homeFaint.Render(" · CPU")
+	rightTitle := rightStyle.Render(m.text("额度"))
+	if standardPeriods {
+		rightTitle += homeFaint.Render(" · " + m.text("5小时/周"))
+	} else {
+		rightTitle += homeFaint.Render(m.text(" · 已用"))
+	}
+	hostWidth, quotaWidth := resourceWidths(gridW)
+	if gridW < resourceSplitWidth && ansi.StringWidth(leftTitle)+2+ansi.StringWidth(rightTitle) > gridW {
+		leftTitle = leftStyle.Render(m.text("机器"))
+	}
+	if (gridW < resourceSplitWidth && ansi.StringWidth(leftTitle)+2+ansi.StringWidth(rightTitle) > gridW) ||
+		(gridW >= resourceSplitWidth && quotaWidth < ansi.StringWidth(rightTitle)) {
+		rightTitle = rightStyle.Render(m.text("额度"))
+	}
+	combine := func(left, right string) string {
+		return fill(left, hostWidth) + "   " + clip(right, quotaWidth)
+	}
+	heading := pair(leftTitle, rightTitle, gridW)
+	usageX := margin + gridW - ansi.StringWidth(rightTitle)
+	if gridW >= resourceSplitWidth {
+		heading = combine(leftTitle, rightTitle)
+		usageX = margin + hostWidth + 3
+	}
+	m.homeDrawerHits = []homeDrawerHit{
+		{start: margin, end: margin + ansi.StringWidth(leftTitle), focus: 1},
+		{start: usageX, end: min(margin+gridW, usageX+ansi.StringWidth(rightTitle)), focus: 2},
+	}
+	rows := []string{homeRule.Render(strings.Repeat("─", m.width)), pad + heading}
+	switch {
+	case m.focus == 2:
+		for _, line := range m.quotaRows(sources, now, standardPeriods, gridW) {
+			rows = append(rows, pad+line)
+		}
+	default:
+		start := min(m.hostOffset, max(0, len(m.feed.Hosts)-limit))
+		for i, line := range m.homeHostRows(w, tier, gridW, limit, m.focus == 1) {
+			rows = append(rows, line)
+			if !m.demo && start+i < len(m.feed.Hosts) {
+				m.homeDrawerHits = append(m.homeDrawerHits, homeDrawerHit{row: i + 1, start: margin, end: margin + gridW, focus: 1, hostSlot: start + i + 1})
+			}
+		}
+	}
+	return rows
+}
+
+func (m *model) homeHostRows(w int, tier homeTier, gridW, limit int, exact bool) []string {
+	margin := m.homeMargin()
+	fullGridW := gridW + margin*2
+	var rows []string
+	if m.demo {
+		start := min(m.hostOffset, max(0, len(hostExamples)-limit))
+		for i, host := range hostExamples[start:min(start+limit, len(hostExamples))] {
+			label := fmt.Sprintf("%d %s", start+i+1, m.text(host.label))
+			value := fmt.Sprintf("%d%%", host.cpu)
+			if host.badge != "" {
+				value += " · " + host.badge + m.text("条提醒")
+			}
+			sel := exact && i+start == m.hostSelection
+			titleStyle := homeTaskText
+			valStyle := homeMuted
+			if sel {
+				titleStyle, valStyle = homeSelectedTitle, homeSelectedMuted
+			}
+			rows = append(rows, renderHomeRow(w, fullGridW, sel, homeTaskPrefix(tier, sel), label, titleStyle, []homeCell{{text: value, style: valStyle}}))
+		}
+		return rows
+	}
+	if len(m.feed.Hosts) == 0 {
+		msg := m.text("需在 Rex 中启动")
+		if m.rexContext.Inside() {
+			msg = m.text("连接中…")
+		} else if m.rexContext.SidebarID != "" {
+			msg = m.text("Rex 未连接")
+		}
+		return []string{strings.Repeat(" ", margin) + homeMuted.Render(msg)}
+	}
+	start := min(m.hostOffset, max(0, len(m.feed.Hosts)-limit))
+	visible := m.feed.Hosts[start:min(start+limit, len(m.feed.Hosts))]
+	for i, host := range visible {
+		sel := exact && i+start == m.hostSelection
+		titleStyle := homeTaskText
+		valStyle := homeMuted
+		if sel {
+			titleStyle, valStyle = homeSelectedTitle, homeSelectedMuted
+		}
+		value := m.text("连接中")
+		cpu := m.hostCPU[host.ID]
+		switch host.State {
+		case rex.Live:
+			value = fmt.Sprintf(m.text("%d会话 %d窗"), host.SessionCount, host.WindowCount)
+			if cpu != nil {
+				value = fmt.Sprintf("%d%%  %s", *cpu, value)
+			}
+		case rex.Partial:
+			value = m.text("部分可用")
+			valStyle = homeWait
+		case rex.Offline:
+			value = m.text("失联 · 重连")
+			valStyle = homeError
+		}
+		label := fmt.Sprintf("%d %s", start+i+1, m.hostLabel(host.Host))
+		rows = append(rows, renderHomeRow(w, fullGridW, sel, homeTaskPrefix(tier, sel), label, titleStyle, []homeCell{{text: value, style: valStyle}}))
 	}
 	return rows
 }

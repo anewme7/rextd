@@ -42,20 +42,18 @@ func handlePaletteNavigation(store *taskStore, encode *json.Encoder, args []stri
 	}
 	var selected *task
 	for _, t := range tasks {
-		if t.id == req.TaskID && !t.archived {
+		if t.id == req.TaskID {
 			selected = t
 			break
 		}
 	}
-	if selected == nil || slices.ContainsFunc(tasks, func(t *task) bool {
-		return t.id == selected.parentID && t.archived
-	}) {
+	if selected == nil {
 		return paletteError("the task is no longer available", "任务已不存在，请重新查找")
 	}
 
 	id := paneIdentity{req.Pane.HostID, req.Pane.SessionID, req.Pane.BlockID}
 	if args[0] == "resume" {
-		if err := store.savePaletteResume(req.TaskID, id, req.Reason); err != nil {
+		if err := store.savePaletteResume(req.Client, req.TaskID, id, req.Reason); err != nil {
 			return err
 		}
 		return encode.Encode(map[string]int64{"task_id": req.TaskID})
@@ -66,23 +64,14 @@ func handlePaletteNavigation(store *taskStore, encode *json.Encoder, args []stri
 		if i < 0 || id.host == "local" || req.Client == "" {
 			return paletteError("could not resolve the selected remote pane", "无法定位选中的远端窗格")
 		}
-		panes = panes[i : i+1]
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	targets := rex.LinkedPanes(ctx, panes)
-	cancel()
-	if args[0] == "jump" {
-		target := targets[0]
-		if target.Unavailable != "" {
-			return encode.Encode(map[string]string{"unavailable": target.Unavailable})
-		}
 		c := rex.Context{SessionID: req.OriginSession, SidebarID: req.OriginBlock}
-		if err := c.FocusFrom(context.Background(), target.Pane, req.Client); err != nil {
-			return encode.Encode(map[string]string{"unavailable": "jump_failed"})
-		}
+		target := c.FocusLinkedPane(context.Background(), panes[i], req.Client)
 		return encode.Encode(newPaletteTarget(target))
 	}
-	recent, _ := store.readPaletteResume()
+	ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
+	defer cancel()
+	targets := rex.LinkedPanes(ctx, panes)
+	recent, _ := store.readPaletteResume(req.Client)
 	slices.SortStableFunc(targets, func(a, b rex.PaneTarget) int {
 		if (a.Unavailable == "") != (b.Unavailable == "") {
 			if a.Unavailable == "" {
@@ -143,42 +132,43 @@ type paletteResume struct {
 	reason           string
 }
 
-func (s *taskStore) readPaletteResume() (paletteResume, error) {
+func (s *taskStore) readPaletteResume(client string) (paletteResume, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
 	defer cancel()
 	var r paletteResume
-	err := s.db.QueryRowContext(ctx, "SELECT revision,task,host_id,session_id,block_id,reason FROM palette_resume WHERE slot=1").
+	err := s.db.QueryRowContext(ctx, "SELECT revision,task,host_id,session_id,block_id,reason FROM palette_client_resume WHERE client=?", client).
 		Scan(&r.revision, &r.taskID, &r.pane.host, &r.pane.session, &r.pane.block, &r.reason)
 	return r, err
 }
 
-func (s *taskStore) savePaletteResume(taskID int64, pane paneIdentity, reason string) error {
+func (s *taskStore) savePaletteResume(client string, taskID int64, pane paneIdentity, reason string) error {
 	switch reason {
 	case "", "host_unavailable", "pane_closed", "link_missing", "jump_failed":
 	default:
 		reason = "jump_failed"
 	}
-	return s.exec(`INSERT INTO palette_resume (slot,revision,task,host_id,session_id,block_id,reason)
-VALUES (1,1,?,?,?,?,?)
-ON CONFLICT(slot) DO UPDATE SET revision=palette_resume.revision+1,task=excluded.task,
+	return s.exec(`INSERT INTO palette_client_resume (client,revision,task,host_id,session_id,block_id,reason)
+VALUES (?,?,?,?,?,?,?)
+ON CONFLICT(client) DO UPDATE SET revision=max(palette_client_resume.revision+1,excluded.revision),task=excluded.task,
 host_id=excluded.host_id,session_id=excluded.session_id,block_id=excluded.block_id,reason=excluded.reason`,
-		taskID, pane.host, pane.session, pane.block, reason)
+		client, time.Now().UnixMicro(), taskID, pane.host, pane.session, pane.block, reason)
 }
 
 func (m *model) applyPaletteResume() {
 	r := m.paletteResume
 	if r.revision == 0 || r.revision == m.paletteResumeApplied ||
 		m.editing || m.taskEdit != nil || m.taskPick != nil ||
-		m.page == taskMenuPage || m.page == linkPage || m.jumping ||
+		m.page == taskMenuPage || m.page == taskDeletePage || m.page == linkPage || m.jumping || m.terminalPreview != nil ||
 		(m.scene != nil && m.scene.editing) {
 		return
 	}
 	m.paletteResumeApplied = r.revision
 	i := slices.IndexFunc(m.tasks, func(t *task) bool { return t.id == r.taskID })
-	if i < 0 || m.archivedTask(m.tasks[i]) {
+	if i < 0 {
 		return
 	}
 	t := m.tasks[i]
+	m.homeScrollManual = false
 	m.cancelPaneTurn()
 	m.scene = nil
 	m.selectTask(t)

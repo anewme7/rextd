@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"rex-td/rex"
@@ -18,7 +20,7 @@ type paneScene struct {
 	request uint64
 	more    bool
 	editing bool
-	input   string
+	input   lineInput
 }
 
 func (m *model) cancelPaneTurn() {
@@ -36,7 +38,7 @@ func (m *model) paneSceneView(width int) listView {
 		add(ink.Render(m.text("关联 Codex 会话")))
 		add("")
 		add(dim.Render(m.text("会话 ID")))
-		add(clip(scene.input+"▏", width))
+		add(scene.input.view(width))
 		if m.notice != "" {
 			add(dim.Render(m.notice))
 		}
@@ -59,6 +61,17 @@ func (m *model) paneSceneView(width int) listView {
 	add("")
 	add(ink.Render(clip(m.paneDisplayTitle(pane), width)))
 	add(pair(dim.Render(m.paneLocation(pane)), m.status(state), width))
+	var taskNames []string
+	for _, t := range m.tasks {
+		if slices.ContainsFunc(t.panes, func(bound rex.Pane) bool { return samePane(bound, pane) }) {
+			taskNames = append(taskNames, m.taskText(t, t.title))
+		}
+	}
+	association := m.text("未关联任务")
+	if len(taskNames) != 0 {
+		association = m.text("关联任务") + " · " + strings.Join(taskNames, " / ")
+	}
+	add(dim.Render(clip(association, width)))
 	if pane, ok := m.sceneResult(); ok {
 		action := "标为已看"
 		if m.seenResults[identityOf(pane)].matches(pane) {
@@ -199,7 +212,7 @@ func (m *model) waitingReason(reason string) string {
 func (m *model) paneMilestone(state string) (string, string) {
 	switch state {
 	case "done":
-		return m.text("本轮结束，待验收"), m.text("回车跳转，核对结果")
+		return m.text("本轮结束"), m.text("回车跳转，核对结果")
 	case "permission":
 		return m.text("请求批准"), m.text("回车跳转，查看批准请求")
 	case "question":

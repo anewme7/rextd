@@ -82,8 +82,8 @@ func (s *taskStore) addCandidateTask(task *task, pane rex.Pane) (int64, error) {
 	}
 	defer tx.Rollback()
 	var id int64
-	err = tx.QueryRowContext(ctx, `INSERT INTO task(title,state,note)
-SELECT ?, 'To do', ? WHERE NOT EXISTS (
+	err = tx.QueryRowContext(ctx, `INSERT INTO task(id,title,state,note)
+SELECT `+nextStoredTaskID+`, ?, 'To do', ? WHERE NOT EXISTS (
     SELECT 1 FROM rex_pane_binding WHERE host_id=? AND session_id=? AND block_id=?
 ) RETURNING id`, task.title, task.note, pane.Host.ID, pane.SessionID, pane.ID).Scan(&id)
 	if err != nil {

@@ -18,14 +18,19 @@ local function sidebar_in_window(ctx, view)
     end
     if contains_origin or (not ctx.block_id and window.window_id == view.active_window_id) then
       for _, block in ipairs(candidates) do
-        local id = block.block_id
-        local process = rex.call(terminal .. ".process", { session_id = ctx.session_id, block_id = id, args = {} })
-        local foreground = process and process.foreground
-        local path = foreground and foreground.path
-        -- Rex can report the macOS login wrapper for a directly launched command.
-        if path and (path:match("/rextd$") or
-            (path == "/usr/bin/login" and block.label == "rextd" and not process.last_exit)) then
-          return id
+        -- Dedicated Home windows belong to one client. The Home action below
+        -- resolves their client label and verifies the exact running binary.
+        if not (block.label or ""):match("^rextd · Home/") then
+          local id = block.block_id
+          local process = rex.call(terminal .. ".process", { session_id = ctx.session_id, block_id = id, args = {} })
+          local program = process and not process.last_exit and process.foreground
+          if program and program.path then
+            if program.path:match("/rextd$") then return id end
+            if program.path == "/usr/bin/login" and block.label == "rextd" and program.pid then
+              local child = rex.exec({ "/usr/bin/pgrep", "-P", tostring(program.pid), "-x", "rextd" }, { timeout = 2 })
+              if child and child.ok then return id end
+            end
+          end
         end
       end
       return nil
@@ -36,7 +41,7 @@ end
 rex.action({
   name = "rextd_show_host",
   title = text("td / Show Host 1", "td / 显示 1 号主机"),
-  description = text("Focus rextd in this Rex window and filter Attention by host number", "聚焦当前窗口的 rextd，按主机编号筛选需要处理列表"),
+  description = text("Show Attention for this host in your task board", "打开此客户端的看板，按主机编号筛选待处理会话"),
   category = "td",
   keywords = "rextd tasks sidebar host filter 任务 侧栏 主机 筛选",
   args = { slot = "integer?" },
@@ -48,16 +53,19 @@ rex.action({
     local view, view_error = rex.call("session.view", { session_id = ctx.session_id })
     if not view then error(view_error, 0) end
     local target = sidebar_in_window(ctx, view)
+    local session = ctx.session_id
     if not target then
-      error(text("Open rextd in this Rex window first.", "请先在当前 Rex 窗口打开 rextd。"), 0)
+      local board, err = rex.invoke("rextd_current_task", { host_slot = slot })
+      if not board then error(err, 0) end
+      return { block_id = board.block_id }
     end
     local result, write_error = rex.call(terminal .. ".write", {
-      session_id = ctx.session_id,
+      session_id = session,
       block_id = target,
       args = { data = string.char(27) .. tostring(slot) },
     })
     if not result then error(write_error, 0) end
-    local focused, focus_error = rex.call("session.focus_block", { session_id = ctx.session_id, block_id = target })
+    local focused, focus_error = rex.call("session.focus_block", { session_id = session, block_id = target })
     if not focused then error(focus_error, 0) end
     return { block_id = target }
   end,

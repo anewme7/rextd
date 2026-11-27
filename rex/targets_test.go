@@ -47,8 +47,8 @@ func TestLinkedPanesBatchesAcrossSessionsOnOneHost(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	const cli = `#!/bin/sh
 case "$*" in
-  *"do --all --fail-fast"*'{"links":[{"block_id":"block:first","session_id":"session:one"},{"block_id":"block:second","session_id":"session:two"},{"block_id":"block:gone","session_id":"session:one"}]}'*)
-    echo '{"targets":[{"block_id":"block:first","session_id":"session:one","window_id":"window:new","session":"Build","records":[{"state":"done"}]},{"block_id":"block:second","session_id":"session:two","window_id":"window:next","label":"Check","records":[{"state":"working"}]},{"block_id":"block:gone","unavailable":"pane_closed"}]}';;
+  *"do --fail-fast"*'{"links":[{"block_id":"block:first","session_id":"session:one"},{"block_id":"block:second","session_id":"session:two"},{"block_id":"block:gone","session_id":"session:one"}]}'*)
+    echo '{"targets":[{"block_id":"block:first","session_id":"session:one","window_id":"window:new","session":"Build","records":[{"state":"done"}]},{"block_id":"block:second","session_id":"session:two","window_id":"window:next","label":"Check","records":{}},{"block_id":"block:gone","unavailable":"pane_closed"}]}';;
   *) exit 1;;
 esac
 `
@@ -61,7 +61,7 @@ esac
 		{Host: localHost, SessionID: "session:one", ID: "block:gone"},
 	})
 	if targets[0].WindowID != "window:new" || targets[0].Status != "done" ||
-		targets[1].Label != "Check" || targets[1].Status != "working" || targets[2].Unavailable != "pane_closed" {
+		targets[1].Label != "Check" || targets[1].Status != "" || targets[2].Unavailable != "pane_closed" {
 		t.Fatalf("native batch did not retain live locations and status: %+v", targets)
 	}
 }

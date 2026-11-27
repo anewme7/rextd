@@ -136,11 +136,18 @@ func (m *model) candidateIndex() int {
 }
 
 func (m *model) onCandidates() bool {
-	return m.page == listPage && !m.attention && m.focus == 0 && m.candidatesFocused
+	return m.page == listPage && !m.attention && m.focus == 0 && m.candidatesFocused &&
+		(!m.onHomeBoard() || len(m.candidates) > 0)
 }
 
 func (m *model) moveCandidates(delta int) {
 	i := m.candidateIndex()
+	if m.onHomeBoard() && ((i < 0 && delta < 0) ||
+		(delta > 0 && len(m.newAgents) > 0 && m.unassignedUrgency() == 0 &&
+			(!m.candidatesOpen || i == len(m.candidates)-1))) {
+		m.moveHome(delta)
+		return
+	}
 	if i < 0 && delta < 0 {
 		m.candidatesFocused = false
 		return
@@ -167,7 +174,8 @@ func (m *model) candidateKey(key string) bool {
 		} else {
 			c := m.candidates[i]
 			m.candidateDraft = &c
-			m.editing, m.input = true, m.sampleText(c.title)
+			m.editing = true
+			m.input.set(m.sampleText(c.title))
 		}
 	case "i":
 		if i >= 0 {
@@ -200,7 +208,7 @@ func (m *model) acceptCandidate(title string) {
 		return identityOf(c.pane) == id && c.topic == draft.topic
 	})
 	if i < 0 {
-		m.editing, m.input, m.candidateDraft = false, "", nil
+		m.editing, m.input, m.candidateDraft = false, lineInput{}, nil
 		m.notice = m.text("候选已变化，请重新选择")
 		return
 	}
@@ -211,7 +219,7 @@ func (m *model) acceptCandidate(title string) {
 	if m.store != nil {
 		rowID, err := m.store.addCandidateTask(t, c.pane)
 		if errors.Is(err, sql.ErrNoRows) {
-			m.editing, m.input, m.candidateDraft = false, "", nil
+			m.editing, m.input, m.candidateDraft = false, lineInput{}, nil
 			m.notice = m.text("这个窗格已关联任务")
 			delete(m.candidateRequests, id)
 			m.candidateIgnored[id] = c.topic
@@ -224,9 +232,9 @@ func (m *model) acceptCandidate(title string) {
 		t.id = rowID
 	}
 	m.tasks = append(m.tasks, t)
-	m.taskSelection = len(m.tasks) - 1
+	m.selectTask(t)
 	delete(m.candidateRequests, id)
-	m.editing, m.input, m.candidateDraft = false, "", nil
+	m.editing, m.input, m.candidateDraft = false, lineInput{}, nil
 	m.candidatesFocused, m.candidatePane = false, paneIdentity{}
 	m.refreshCandidates()
 	m.notice = m.text("已收录并关联窗格")

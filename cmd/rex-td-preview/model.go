@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"rex-td/rex"
 )
@@ -18,12 +18,12 @@ type taskState int
 const (
 	todo taskState = iota
 	working
-	blocked
+	paused
 	done
 	cancelled
 )
 
-var stateLabels = [...]string{"待做", "进行中", "受阻", "完成", "已取消"}
+var stateLabels = [...]string{"待做", "进行中", "暂缓", "已完成", "已取消"}
 var densityLabels = [...]string{"紧凑", "标准", "完整"}
 var colorLabels = [...]string{"默认", "蓝", "绿", "琥珀", "紫"}
 
@@ -41,20 +41,21 @@ const (
 var kindLabels = [...]string{"未分类", "功能", "修复", "文档", "运维", "发布"}
 
 type task struct {
-	id                   int64
-	title, note          string
-	state, previousState taskState
-	archived             bool
-	sortOrder, parentID  int64
-	pinned               bool
-	example              bool
-	color                int
-	kind                 taskKind
-	steps                []string
-	completed            int
-	panes                []rex.Pane
-	result               string
-	resultCount          int
+	id                                   int64
+	title, note                          string
+	state, previousState                 taskState
+	archived                             bool
+	sortOrder, parentID, completionOrder int64
+	pinned                               bool
+	example                              bool
+	color                                int
+	kind                                 taskKind
+	steps                                []string
+	completed                            int
+	panes                                []rex.Pane
+	bindings                             map[paneIdentity]paneBinding
+	result                               string
+	resultCount                          int
 }
 
 type page int
@@ -66,16 +67,63 @@ const (
 	helpPage
 )
 
+type homeClickSpan struct {
+	start, end int
+	rowOffset  int
+	cmd        string
+}
+
+type homeDrawerHit struct {
+	row, start, end int
+	focus, hostSlot int
+}
+
 type model struct {
+	genericDirs             map[string]bool
+	autolinkDirty           bool
+	boardSuggestionPane     paneIdentity
+	autolinkStarted         time.Time
+	observedAgents          map[paneIdentity]agentObservation
+	taskTouched             map[int64]int64
+	newAgents               []rex.Pane
+	suggestedTask           int64
+	readingDirectories      bool
+	openingTaskTab          int64
+	removedAgents           map[paneIdentity]bool
+	boardSuggest            bool
+	boardOfferOpen          bool
+	boardOfferSelected      bool
+	homeTab                 taskTab
+	lastActiveTab           taskTab
+	homeOverview            bool
+	homeScrollTop           int
+	homeScrollMax           int
+	homeBodyEnd             int
+	homeScrollManual        bool
+	lastWheel               tea.MouseButton
+	lastWheelAt             time.Time
+	overviewFolded          [4]bool
+	overviewSectionSelected bool
+	overviewSectionTab      taskTab
+	secondaryOpen           [4]bool
+	secondarySelected       bool
+	boardPane               paneIdentity
+	boardMore               bool
+	boardOpenIdle           map[*task]bool
+	homeGraphics            *homeGraphics
+	homePlacements          []homePlacement
 	paletteStoreVersion     int64
 	paletteResume           paletteResume
 	paletteResumeApplied    int64
 	archivedView            bool
 	menuBack                page
 	menuSelection           int
+	taskDelete              taskDeletion
 	taskEdit                *taskEdit
 	taskPick                *taskPick
 	focusPreview            bool
+	terminalPreview         *terminalPreview
+	previews                *rex.TerminalPreviews
 	pickerAll               bool
 	pickerSelection         int
 	replacePane             rex.Pane
@@ -86,6 +134,7 @@ type model struct {
 	expanded                map[*task]bool
 	taskSelection           int
 	detailSelection         int
+	detailIdlePane          paneIdentity
 	paneSelection           int
 	grouping                grouping
 	allPanes                bool
@@ -99,16 +148,18 @@ type model struct {
 	quotaOffset             int
 	attention               bool
 	peek                    bool
+	helpOffset              int
 	page                    page
 	sceneBack               page
 	editing                 bool
-	input                   string
+	input                   lineInput
 	scene                   *paneScene
 	width, height           int
 	updates                 <-chan rex.Fleet
 	feed                    rex.Fleet
 	livePanes               []rex.Pane
 	hostFilter              string
+	startupHost             int
 	hostSelection           int
 	notice                  string
 	jumping                 bool
@@ -124,6 +175,10 @@ type model struct {
 	mouseRows               []listHit
 	mouseBodyStart          int
 	mouseResourceTitle      int
+	homeHeaderHits          []homeClickSpan
+	homeTopHits             []homeClickSpan
+	homeFooterHits          []homeClickSpan
+	homeDrawerHits          []homeDrawerHit
 	candidates              []taskCandidate
 	candidateRequests       map[paneIdentity]string
 	candidateIgnored        map[paneIdentity]string
@@ -140,7 +195,10 @@ func newModel(demo bool) *model {
 		seenResults: make(map[paneIdentity]seenResult),
 		hostCPU:     make(map[string]*int), density: 1,
 		candidateRequests: make(map[paneIdentity]string), candidateIgnored: make(map[paneIdentity]string),
-		candidateWatches: make(map[paneIdentity]bool)}
+		candidateWatches: make(map[paneIdentity]bool),
+		autolinkStarted:  time.Now(), observedAgents: make(map[paneIdentity]agentObservation),
+		taskTouched: make(map[int64]int64), removedAgents: make(map[paneIdentity]bool),
+		overviewFolded: [4]bool{doneTab: true, archiveTab: true}}
 	if demo {
 		m.feed, m.tasks = sampleData()
 		for i, task := range m.tasks {
@@ -184,9 +242,13 @@ func (m *model) watch() tea.Cmd {
 }
 
 type jumpResult struct{ err error }
+type openHome struct{}
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, cmd := m.update(msg)
+	if m.autolinkDirty {
+		cmd = tea.Batch(cmd, m.syncAutolink())
+	}
 	return next, tea.Batch(cmd, m.syncMetrics())
 }
 
@@ -198,15 +260,70 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		msg = event.value
 	}
 	switch msg := msg.(type) {
+	case terminalThemeMsg:
+		lipgloss.SetHasDarkBackground(msg.dark)
+		return m, nil
+	case terminalPreviewUpdate:
+		return m, m.receiveTerminalPreview(msg)
 	case paletteStoreTick:
-		m.refreshPaletteStore()
+		changed := m.refreshPaletteStore()
 		m.applyPaletteResume()
+		if changed {
+			return m, tea.Batch(m.watchPaletteStore(), m.syncAutolink())
+		}
 		return m, m.watchPaletteStore()
+	case openHome:
+		m.startupHost = 0
+		if !m.editing && (m.scene == nil || !m.scene.editing) && m.page != taskPickPage && m.page != taskDeletePage {
+			// A Find request may already be committed but not yet polled.
+			// Home supersedes that request, including while leaving a preview.
+			if m.store != nil {
+				m.refreshPaletteStore()
+				m.paletteResumeApplied = m.paletteResume.revision
+			}
+			m.closeTerminalPreview()
+			m.cancelPaneTurn()
+			m.page, m.attention, m.archivedView = listPage, false, false
+			m.focus, m.peek, m.notice = 0, false, ""
+			m.candidatesFocused = false
+			m.boardSuggest, m.boardMore, m.boardPane, m.boardSuggestionPane = false, false, paneIdentity{}, paneIdentity{}
+			m.boardOfferOpen, m.boardOfferSelected = false, false
+			m.switchHomeTab(nowTab)
+		}
+	case taskTabResult:
+		m.openingTaskTab = 0
+		m.finishTaskTab(msg)
+		return m, m.syncAutolink()
+	case paneDirectoryResult:
+		m.readingDirectories = false
+		for id, reply := range msg {
+			observation, seen := m.observedAgents[id]
+			if seen && observation.app == reply.app {
+				observation.dir, observation.directoryReadAt = reply.dir, reply.directoryReadAt
+				m.observedAgents[id] = observation
+			}
+		}
+		return m, m.syncAutolink()
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if p := m.terminalPreview; p != nil && p.lines != nil {
+			p.layout(msg.Width)
+		}
 		m.mouseRows = nil
 		m.mouseResourceTitle = -1
 	case tea.MouseMsg:
+		m.startupHost = 0
+		if msg.Action == tea.MouseActionPress && (msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown) {
+			// A touch fling may send dozens of wheel reports in a single frame.
+			now := time.Now()
+			if m.lastWheel == msg.Button && now.Sub(m.lastWheelAt) < time.Second/24 {
+				return m, nil
+			}
+			m.lastWheel, m.lastWheelAt = msg.Button, now
+		}
+		if m.terminalPreview != nil {
+			return m, m.terminalPreviewMouse(msg)
+		}
 		return m, m.handleMouse(msg)
 	case rex.Fleet:
 		var target paneIdentity
@@ -217,6 +334,10 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.feed = msg
+		if m.startupHost > 0 && m.startupHost <= len(msg.Hosts) {
+			m.showHost(m.startupHost)
+			m.startupHost = 0
+		}
 		m.pruneSeenResults()
 		if target != (paneIdentity{}) {
 			m.pickerSelection = slices.IndexFunc(m.pickable(), func(p rex.Pane) bool { return identityOf(p) == target })
@@ -230,7 +351,7 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.metrics != nil {
 			m.metrics.addHosts(msg.Hosts)
 		}
-		return m, m.watch()
+		return m, tea.Batch(m.watch(), m.syncAutolink())
 	case cpuUpdate:
 		m.hostCPU[msg.host] = msg.value
 		return m, m.watchMetrics()
@@ -254,14 +375,24 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case paneAgentResult:
 		m.receivePaneAgent(msg)
 	case tea.KeyMsg:
+		m.startupHost = 0
+		m.homeScrollManual = false
 		if msg.Type == tea.KeyCtrlC {
+			m.closeTerminalPreview()
 			return m, tea.Quit
+		}
+		if m.terminalPreview != nil {
+			return m, m.terminalPreviewKey(msg.String())
 		}
 		if m.page == scenePage && m.scene.editing {
 			return m, m.editPaneAgent(msg)
 		}
 		if m.page == taskPickPage {
 			m.taskPickKey(msg)
+			return m, nil
+		}
+		if m.page == taskDeletePage {
+			m.taskDeleteKey(msg.String())
 			return m, nil
 		}
 		if msg.Type == tea.KeyRunes && msg.Alt && len(msg.Runes) == 1 &&
@@ -294,12 +425,17 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) listCommand(key string) tea.Cmd {
+	if m.page == taskDeletePage {
+		m.taskDeleteKey(key)
+		return nil
+	}
 	if m.page == scenePage {
 		switch {
 		case key == "i" && m.scene.pane.App == "codex" && !m.demo:
 			m.cancelPaneTurn()
 			m.scene.request++
-			m.scene.editing, m.scene.input = true, m.scene.binding.id
+			m.scene.editing = true
+			m.scene.input.set(m.scene.binding.id)
 			m.notice = ""
 			return nil
 		case key == "y":
@@ -312,16 +448,83 @@ func (m *model) listCommand(key string) tea.Cmd {
 			return m.readPaneAgent("", false)
 		}
 	}
+	if m.focusPreview && m.page == listPage && m.focus == 0 {
+		switch key {
+		case "1", "2", "3", "4":
+			tab := taskTab(key[0] - '1')
+			if m.homeOverview && !m.attention {
+				m.jumpOverviewSection(tab)
+			} else {
+				m.switchHomeTab(tab)
+			}
+			return nil
+		case "tab", "shift+tab":
+			if m.homeOverview && !m.attention {
+				step := 1
+				if key == "shift+tab" {
+					step = len(homeTabNames) - 1
+				}
+				cur := m.currentOverviewTab()
+				m.jumpOverviewSection((cur + taskTab(step)) % taskTab(len(homeTabNames)))
+				return nil
+			}
+			step := 1
+			if key == "shift+tab" {
+				step = len(homeTabNames) - 1
+			}
+			m.switchHomeTab((m.homeTab + taskTab(step)) % taskTab(len(homeTabNames)))
+			return nil
+		case "esc":
+			if m.attention {
+				m.switchHomeTab(m.homeTab)
+				return nil
+			}
+		case "n":
+			m.hostFilter = ""
+			m.grouping = byStatus
+		}
+	}
 	if m.onCandidates() && m.candidateKey(key) {
 		return nil
 	}
 	if m.focusPreview {
+		if m.page == detailPage && m.detailIdlePane != (paneIdentity{}) {
+			switch key {
+			case "enter":
+				m.linkDetailUnassigned(m.selected())
+				return nil
+			case " ", "right", "r":
+				return nil
+			}
+		}
+		if key == " " && m.focus == 0 {
+			if m.page == listPage && m.attention {
+				groups, group := m.selectedGroup(false)
+				if !groups[group.id] && m.paneSelection < len(m.livePanes) {
+					return m.openTerminalPreview(m.livePanes[m.paneSelection])
+				}
+				return nil
+			}
+			if t := m.selected(); m.page == detailPage && t != nil && len(t.panes) != 0 {
+				return m.openTerminalPreview(m.currentPane(t.panes[clamp(m.detailSelection, 0, len(t.panes)-1)]))
+			}
+		}
+		if m.focus == 0 && m.onHomeBoard() {
+			if cmd, handled := m.homePaneCommand(key); handled {
+				return cmd
+			}
+		}
 		if m.page == taskMenuPage {
 			m.taskMenuKey(key)
 			return nil
 		}
-		if (m.page == detailPage || (m.page == listPage && !m.attention && m.focus == 0)) && m.taskBoardKey(key) {
-			return nil
+		if m.page == detailPage || (m.page == listPage && !m.attention && m.focus == 0) {
+			if key == "N" && !m.onCandidates() {
+				return m.openTaskTab(m.selected())
+			}
+			if m.taskBoardKey(key) {
+				return nil
+			}
 		}
 		if m.page == linkPage && key != "?" {
 			m.focusLinkKey(key)
@@ -347,12 +550,18 @@ func (m *model) listCommand(key string) tea.Cmd {
 			m.openFocusPicker(key == "r")
 			return nil
 		}
+		if m.page == detailPage && key == "u" {
+			if t := m.selected(); m.selectedPaneUnavailable(t) {
+				m.unlinkTaskPane(t, m.detailSelection)
+			}
+			return nil
+		}
 		if m.page == listPage && !m.attention && key == "a" {
 			m.focusBrowse()
 			return nil
 		}
 		if m.page == listPage && !m.attention && key == "enter" && m.focus == 0 {
-			if t := m.selected(); t != nil && len(t.panes) != 1 {
+			if t := m.selected(); t != nil && (m.onHomeBoard() || len(t.panes) != 1) {
 				m.showDetails()
 				return nil
 			}
@@ -399,7 +608,7 @@ func (m *model) selected() *task {
 func (m *model) handle(key string) {
 	if key == "?" {
 		m.cancelPaneTurn()
-		m.page = helpPage
+		m.page, m.helpOffset = helpPage, 0
 		return
 	}
 	if m.page != listPage {
@@ -413,7 +622,15 @@ func (m *model) handle(key string) {
 	}
 	switch key {
 	case "v":
-		m.grouping = (m.grouping + 1) % grouping(len(groupingLabels))
+		if m.focusPreview && m.attention {
+			order := [...]grouping{byStatus, bySession, byAgent, byHost}
+			idx := slices.Index(order[:], m.grouping)
+			m.grouping = order[(idx+1)%len(order)]
+		} else if m.onHomeBoard() && m.focus == 0 {
+			m.setHomeOverview(!m.homeOverview)
+		} else {
+			m.grouping = (m.grouping + 1) % 3
+		}
 	case "g":
 		if !m.demo {
 			m.hostFilter = ""
@@ -426,9 +643,12 @@ func (m *model) handle(key string) {
 		m.attention, m.focus = true, 0
 		m.allPanes = false
 		m.refreshPanes()
-		m.paneSelection = 0
+		if groups := m.paneGroups(); len(groups) > 0 {
+			m.paneSelection = groups[0].firstVisibleRow()
+		}
 	case "+":
 		m.editing, m.attention, m.focus = true, false, 0
+		m.input.set("")
 		m.candidatesFocused = false
 	case "z":
 		m.density = (m.density + 1) % len(densityLabels)
@@ -534,6 +754,15 @@ func (m *model) handlePage(key string) {
 		}
 		return
 	}
+	if m.page == helpPage {
+		switch key {
+		case "up", "k":
+			m.helpOffset = max(0, m.helpOffset-1)
+		case "down", "j":
+			m.helpOffset++
+		}
+		return
+	}
 	if m.page == scenePage {
 		switch key {
 		case "d":
@@ -558,18 +787,13 @@ func (m *model) handlePage(key string) {
 			if key == "up" || key == "k" {
 				delta = -1
 			}
-			if m.focusPreview && last >= 0 {
-				order := m.orderedAssociations(t)
-				m.detailSelection = order[clamp(slices.Index(order, m.detailSelection)+delta, 0, last)]
+			if m.focusPreview {
+				m.moveDetailSelection(t, delta)
 			} else {
 				m.detailSelection = clamp(m.detailSelection+delta, 0, last)
 			}
 		case "s":
-			next := (t.state + 1) % (done + 1)
-			if t.state == cancelled {
-				next = t.previousState
-			}
-			m.setTaskState(t, next)
+			m.cycleTaskState(t)
 		case "p":
 			m.pin(t)
 		case "b":
@@ -605,7 +829,9 @@ func (m *model) move(delta int) {
 		}
 		m.quotaOffset = clamp(m.quotaOffset+delta, 0, count-limit/2)
 	default:
-		if m.attention {
+		if m.onHomeBoard() {
+			m.moveHome(delta)
+		} else if m.attention {
 			m.paneSelection = moveInGroups(m.paneGroups(), m.paneSelection, delta)
 		} else {
 			groups := m.taskGroups()
@@ -627,9 +853,9 @@ func (m *model) edit(msg tea.KeyMsg) {
 		if m.taskEdit != nil {
 			m.page, m.taskEdit = m.taskEdit.back, nil
 		}
-		m.editing, m.input, m.candidateDraft = false, "", nil
+		m.editing, m.input, m.candidateDraft = false, lineInput{}, nil
 	case tea.KeyEnter:
-		title := strings.TrimSpace(m.input)
+		title := strings.TrimSpace(m.input.value)
 		if m.taskEdit != nil {
 			m.finishTaskEdit(title)
 			return
@@ -648,41 +874,15 @@ func (m *model) edit(msg tea.KeyMsg) {
 				t.id = id
 			}
 			m.tasks = append(m.tasks, t)
-			m.taskSelection = len(m.tasks) - 1
-			m.editing, m.input, m.archivedView = false, "", false
+			m.selectTask(t)
+			m.editing, m.input, m.archivedView = false, lineInput{}, false
 			if m.focusPreview {
 				m.showDetails()
 			}
 		}
 	default:
-		m.input = editTaskText(m.input, msg)
+		m.input.update(msg)
 	}
-}
-
-func editTaskText(text string, msg tea.KeyMsg) string {
-	switch msg.Type {
-	case tea.KeyBackspace, tea.KeyDelete:
-		runes := []rune(text)
-		if len(runes) > 0 {
-			return string(runes[:len(runes)-1])
-		}
-	case tea.KeyCtrlU:
-		return ""
-	case tea.KeyRunes, tea.KeySpace:
-		var input strings.Builder
-		runes := msg.Runes
-		if msg.Type == tea.KeySpace {
-			runes = []rune{' '}
-		}
-		for _, r := range runes {
-			if unicode.IsPrint(r) {
-				input.WriteRune(r)
-			}
-		}
-		runes = []rune(text + input.String())
-		return string(runes[:min(len(runes), 240)])
-	}
-	return text
 }
 
 func (m *model) pin(t *task) {
@@ -736,6 +936,10 @@ func (m *model) openTask(t *task) {
 
 func (m *model) showDetails() {
 	m.page, m.detailSelection, m.notice = detailPage, 0, ""
+	m.detailIdlePane = paneIdentity{}
+	if t := m.selected(); t != nil {
+		m.touchTask(t)
+	}
 }
 
 func (m *model) showPane(p rex.Pane) {
@@ -845,18 +1049,34 @@ func (m *model) link(t *task, p rex.Pane) {
 		return
 	}
 	index := slices.IndexFunc(t.panes, func(old rex.Pane) bool { return samePane(old, p) })
-	if m.store != nil && !m.saved(m.store.bind(t.id, p, index >= 0)) {
-		return
-	}
 	if index >= 0 {
-		t.panes = slices.Delete(t.panes, index, index+1)
-		m.notice = m.text("已解除关联 · ") + m.taskText(t, t.title)
-		m.refreshCandidates()
+		m.unlinkTaskPane(t, index)
 		return
 	}
-	t.panes = append(t.panes, p)
+	if m.store != nil && !m.saved(m.store.bind(t.id, p, false)) {
+		return
+	}
+	t.addBinding(p, paneBinding{source: linkManual, linkedAt: time.Now().UnixMilli()})
+	delete(m.removedAgents, identityOf(p))
+	m.touchTask(t)
 	m.refreshCandidates()
 	m.notice = m.text("已关联 · ") + m.taskText(t, t.title)
+}
+
+func (m *model) unlinkTaskPane(t *task, index int) {
+	pane := t.panes[index]
+	if m.store != nil && !m.saved(m.store.bind(t.id, pane, true)) {
+		return
+	}
+	t.panes = slices.Delete(t.panes, index, index+1)
+	delete(t.bindings, identityOf(pane))
+	m.removedAgents[identityOf(pane)] = true
+	if m.page == detailPage {
+		m.detailSelection = clamp(index, 0, len(t.panes)-1)
+	}
+	m.touchTask(t)
+	m.refreshCandidates()
+	m.notice = m.text("已解除关联 · ") + m.taskText(t, t.title)
 }
 
 func (m *model) paneLocation(p rex.Pane) string {

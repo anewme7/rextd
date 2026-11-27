@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"slices"
 	"strings"
 
@@ -13,10 +14,11 @@ const (
 	bySession grouping = iota
 	byAgent
 	byHost
+	byStatus
 )
 
-var groupingLabels = [...]string{"会话", "Agent", "主机"}
-var mixedLabels = [...]string{"跨会话", "跨 Agent", "跨主机"}
+var groupingLabels = [...]string{"会话", "Agent", "主机", "状态"}
+var mixedLabels = [...]string{"跨会话", "跨 Agent", "跨主机", "多状态"}
 
 type groupKey struct{ id, title string }
 
@@ -72,6 +74,9 @@ func orderGroups(groups []listGroup, folded map[string]bool) []listGroup {
 		case b.key == unlinkedGroup:
 			return -1
 		}
+		if strings.HasPrefix(a.key.id, "status:") && strings.HasPrefix(b.key.id, "status:") {
+			return strings.Compare(a.key.id, b.key.id)
+		}
 		if order := strings.Compare(a.key.title, b.key.title); order != 0 {
 			return order
 		}
@@ -121,6 +126,17 @@ func (m *model) sessionKey(p rex.Pane, underHost bool) groupKey {
 
 func (m *model) groupForPane(p rex.Pane) groupKey {
 	switch m.grouping {
+	case byStatus:
+		switch homeStatus(p.Status) {
+		case homeWaiting, homeFailed:
+			return groupKey{"status:1-waiting", m.text("需回应")}
+		case homeFinished:
+			return groupKey{"status:2-done", m.text("本轮完成")}
+		case homeRunning:
+			return groupKey{"status:3-running", m.text("工作中")}
+		default:
+			return groupKey{"status:4-quiet", m.text("空闲与不可用")}
+		}
 	case byAgent:
 		if p.App == "" {
 			return groupKey{"agent:", m.text("其他窗格")}
@@ -174,30 +190,7 @@ func hostGroup(key groupKey) bool { return strings.HasPrefix(key.id, "host:") }
 func (m *model) taskGroups() []listGroup {
 	var groups []listGroup
 	if m.focusPreview {
-		children := m.childRows()
-		for i, t := range m.tasks {
-			if m.archivedView {
-				parent := m.parentOf(t)
-				if !t.archived || (parent != nil && parent.archived) {
-					continue
-				}
-			} else if t.archived || t.parentID != 0 {
-				continue
-			}
-			key := groupKey{id: "tasks"}
-			if t.inPinnedSection() && !m.archivedView {
-				key = pinnedGroup
-			}
-			group := addGroup(&groups, key, i)
-			if m.expanded[t] {
-				for _, row := range children[t.id] {
-					if m.archivedView || !m.tasks[row].archived {
-						group.rows = append(group.rows, row)
-					}
-				}
-			}
-		}
-		return orderGroups(groups, nil)
+		return m.homeTaskGroups()
 	}
 	for i, t := range m.tasks {
 		key := m.groupForTask(t)
@@ -207,6 +200,50 @@ func (m *model) taskGroups() []listGroup {
 		}
 	}
 	return orderGroups(groups, m.foldedTasks)
+}
+
+func (m *model) homeTaskGroups() []listGroup {
+	if m.homeTab == archiveTab {
+		archived := listGroup{key: groupKey{"archived", "已归档"}}
+		for i, t := range m.tasks {
+			parent := m.parentOf(t)
+			if t.archived && (parent == nil || !parent.archived) {
+				archived.rows = append(archived.rows, i)
+			}
+		}
+		slices.SortStableFunc(archived.rows, func(a, b int) int {
+			return cmp.Compare(m.tasks[b].completionOrder, m.tasks[a].completionOrder)
+		})
+		if len(archived.rows) == 0 {
+			return nil
+		}
+		return []listGroup{archived}
+	}
+	groups := [...]listGroup{
+		working:   {key: groupKey{"working", "进行中"}},
+		paused:    {key: groupKey{"paused", "暂缓"}},
+		todo:      {key: groupKey{"todo", "待做"}},
+		done:      {key: groupKey{"done", "已完成"}},
+		cancelled: {key: groupKey{"cancelled", "已取消"}},
+	}
+	for i, t := range m.tasks {
+		if tabForState(t.state) == m.homeTab && !m.archivedTask(t) {
+			groups[t.state].rows = append(groups[t.state].rows, i)
+		}
+	}
+	waiting := make(map[int]int, len(groups[working].rows))
+	for _, row := range groups[working].rows {
+		waiting[row] = m.boardStatus(m.tasks[row]).waiting
+	}
+	slices.SortStableFunc(groups[working].rows, func(a, b int) int {
+		if (waiting[a] > 0) != (waiting[b] > 0) {
+			return cmp.Compare(waiting[b], waiting[a])
+		}
+		return 0
+	})
+	slices.SortStableFunc(groups[done].rows, func(a, b int) int { return cmp.Compare(m.tasks[b].completionOrder, m.tasks[a].completionOrder) })
+	order := []listGroup{groups[working], groups[todo], groups[paused], groups[done], groups[cancelled]}
+	return slices.DeleteFunc(order, func(group listGroup) bool { return len(group.rows) == 0 })
 }
 
 func (m *model) groupForAttention(p rex.Pane) groupKey {
@@ -223,6 +260,20 @@ func (m *model) paneGroups() []listGroup {
 		parent := addGroup(&groups, key, i)
 		if hostGroup(key) {
 			addGroup(&parent.children, m.sessionKey(p, true), i)
+		}
+	}
+	if m.focusPreview {
+		// Drawing, keyboard navigation and folding share this order.
+		sortRows := func(rows []int) {
+			slices.SortStableFunc(rows, func(a, b int) int {
+				return cmp.Compare(homeStatus(m.livePanes[a].Status), homeStatus(m.livePanes[b].Status))
+			})
+		}
+		for _, group := range groups {
+			sortRows(group.rows)
+			for _, child := range group.children {
+				sortRows(child.rows)
+			}
 		}
 	}
 	return orderGroups(groups, m.foldedPanes)

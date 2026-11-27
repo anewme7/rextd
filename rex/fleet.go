@@ -20,7 +20,11 @@ type Host struct {
 var localHost = Host{ID: "local", Label: "本机"}
 
 func (h Host) command(ctx context.Context, tail ...string) *exec.Cmd {
-	args := []string{"--autostart=false", "--timeout", "4s", "--color", "never"}
+	return h.commandWithTimeout(ctx, 4*time.Second, tail...)
+}
+
+func (h Host) commandWithTimeout(ctx context.Context, timeout time.Duration, tail ...string) *exec.Cmd {
+	args := []string{"--autostart=false", "--timeout", timeout.String(), "--color", "never"}
 	if h.Server != "" {
 		args = append(args, "-S", h.Server)
 	}
@@ -98,18 +102,18 @@ func configuredHosts(ctx context.Context) ([]Host, error) {
 
 // WatchFleet shares one replaceable aggregate with the UI. Each configured
 // server connects and reconnects independently of the others.
-func (c Context) WatchFleet(ctx context.Context, logger *slog.Logger) (<-chan Fleet, <-chan struct{}) {
+func (c Context) WatchFleet(ctx context.Context, logger *slog.Logger, previews *TerminalPreviews) (<-chan Fleet, <-chan struct{}) {
 	updates := make(chan Fleet, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer close(updates)
-		c.watchFleet(ctx, logger, updates)
+		c.watchFleet(ctx, logger, previews, updates)
 	}()
 	return updates, done
 }
 
-func (c Context) watchFleet(ctx context.Context, logger *slog.Logger, output chan Fleet) {
+func (c Context) watchFleet(ctx context.Context, logger *slog.Logger, previews *TerminalPreviews, output chan Fleet) {
 	hosts := []Host{localHost}
 	latest := map[string]Snapshot{localHost.ID: {State: Connecting}}
 	type update struct {
@@ -119,7 +123,7 @@ func (c Context) watchFleet(ctx context.Context, logger *slog.Logger, output cha
 	incoming := make(chan update, 1)
 	var closed []<-chan struct{}
 	start := func(host Host) {
-		up, done := c.watchHost(ctx, host, logger)
+		up, done := c.watchHost(ctx, host, logger, previews)
 		forwarded := make(chan struct{})
 		closed = append(closed, forwarded)
 		go func() {

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 //go:embed targets.lua
@@ -53,7 +54,7 @@ func LinkedPanes(ctx context.Context, panes []Pane) []PaneTarget {
 			defer workers.Done()
 			defer func() { <-slots }()
 			host := hosts[hostID]
-			if !host.resolveLinks(ctx, targets, indices) {
+			if !host.resolveLinks(ctx, targets, indices) && ctx.Err() == nil {
 				host.resolveLinksFromLayout(ctx, targets, indices)
 			}
 		}()
@@ -76,7 +77,7 @@ func (h Host) resolveLinks(ctx context.Context, targets []PaneTarget, indices []
 	if err != nil {
 		return false
 	}
-	raw, err := h.command(ctx, "do", "--all", "--fail-fast", "-e", targetsScript, "--args", string(args), "--json").Output()
+	raw, err := h.commandWithTimeout(ctx, 12*time.Second, "do", "--fail-fast", "-e", targetsScript, "--args", string(args), "--json").Output()
 	if err != nil {
 		return false
 	}
@@ -86,7 +87,7 @@ func (h Host) resolveLinks(ctx context.Context, targets []PaneTarget, indices []
 			SessionID                           string `json:"session_id"`
 			WindowID                            string `json:"window_id"`
 			Label, Window, Session, Unavailable string
-			Records                             []report
+			Records                             json.RawMessage
 		}
 	}
 	if json.Unmarshal(raw, &reply) != nil || len(reply.Targets) != len(indices) {
@@ -105,7 +106,11 @@ func (h Host) resolveLinks(ctx context.Context, targets []PaneTarget, indices []
 		if target.Unavailable == "" {
 			target.Label = first(cleaned(row.Label), target.Label)
 			target.Session, target.Window, target.WindowID = cleaned(row.Session), cleaned(row.Window), row.WindowID
-			target.Pane = paneWithStatus(target.Pane, row.Records)
+			// Rex Lua encodes an empty table as {}. Optional status must not
+			// invalidate a terminal whose current location is already known.
+			var records []report
+			_ = json.Unmarshal(row.Records, &records)
+			target.Pane = paneWithStatus(target.Pane, records)
 		}
 	}
 	return true

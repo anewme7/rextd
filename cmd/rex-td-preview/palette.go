@@ -28,10 +28,11 @@ type palettePane struct {
 }
 
 type paletteTask struct {
-	ID    int64         `json:"id"`
-	Title string        `json:"title"`
-	State string        `json:"state"`
-	Panes []palettePane `json:"panes"`
+	ID       int64         `json:"id"`
+	Title    string        `json:"title"`
+	State    string        `json:"state"`
+	Archived bool          `json:"archived,omitempty"`
+	Panes    []palettePane `json:"panes"`
 }
 
 type captureRequest struct {
@@ -68,7 +69,7 @@ func palette(args []string) error {
 		}
 		return encode.Encode(map[string]int64{"task_id": taskID})
 	}
-	if args[0] != "list" {
+	if args[0] != "list" && args[0] != "find-list" {
 		return handlePaletteNavigation(store, encode, args)
 	}
 	if len(args) != 1 {
@@ -86,10 +87,15 @@ func palette(args []string) error {
 	}
 	result := make([]paletteTask, 0, len(tasks))
 	for _, t := range tasks {
-		if t.archived || archived[t.parentID] {
+		isArchived := t.archived || archived[t.parentID]
+		if isArchived && args[0] == "list" {
 			continue
 		}
-		entry := paletteTask{ID: t.id, Title: t.title, State: storedStates[t.state], Panes: make([]palettePane, 0, len(t.panes))}
+		state := storedStates[t.state]
+		if t.state == paused {
+			state = "Paused"
+		}
+		entry := paletteTask{ID: t.id, Title: t.title, State: state, Archived: isArchived, Panes: make([]palettePane, 0, len(t.panes))}
 		for _, p := range t.panes {
 			entry.Panes = append(entry.Panes, palettePane{
 				p.Host.ID, p.Host.Label, p.SessionID, p.Session, p.WindowID, p.ID, paneTitle(p), p.App,
@@ -123,7 +129,7 @@ func (s *taskStore) captureLocalPane(request captureRequest) (int64, error) {
 		if title == "" || len([]rune(title)) > 240 {
 			return 0, paletteError("enter a title of 1 to 240 characters", "请填写 1 至 240 字的标题")
 		}
-		row, err := tx.ExecContext(ctx, "INSERT INTO task(title, state) VALUES(?, ?)", title, storedStates[todo])
+		row, err := tx.ExecContext(ctx, "INSERT INTO task(id,title,state) VALUES("+nextStoredTaskID+",?,?)", title, storedStates[todo])
 		if err != nil {
 			return 0, err
 		}
@@ -160,19 +166,19 @@ func (m *model) watchPaletteStore() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return paletteStoreTick{} })
 }
 
-func (m *model) refreshPaletteStore() {
+func (m *model) refreshPaletteStore() bool {
 	version, err := m.store.changeVersion()
 	if err != nil || version == m.paletteStoreVersion {
-		return
+		return false
 	}
 	tasks, err := m.store.load()
 	if err != nil {
-		return
+		return false
 	}
 
 	seen, err := m.store.loadSeenResults()
 	if err != nil {
-		return
+		return false
 	}
 
 	selected := m.selected()
@@ -210,7 +216,8 @@ func (m *model) refreshPaletteStore() {
 	m.pruneSeenResults()
 	m.refreshPanes()
 	m.refreshCandidates()
-	m.paletteResume, _ = m.store.readPaletteResume()
+	m.paletteResume, _ = m.store.readPaletteResume(os.Getenv("REX_CLIENT"))
+	return true
 }
 
 func paletteError(en, zh string) error {

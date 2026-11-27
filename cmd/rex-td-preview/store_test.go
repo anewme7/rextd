@@ -70,6 +70,12 @@ INSERT INTO pane_link VALUES (12,'session:old','block:old','旧窗格');`)
 	if old.note != "保留备注" || old.kind != uncategorized || len(old.panes) != 1 || old.panes[0].Host.ID != "local" || old.panes[0].ID != "block:old" {
 		t.Fatalf("legacy link or task was lost: %+v", old)
 	}
+	if old.bindings[identityOf(old.panes[0])] != (paneBinding{source: linkManual}) {
+		t.Fatalf("migrated link should default to manual: %+v", old.bindings)
+	}
+	if binding := current.bindings[identityOf(target)]; binding.source != linkManual || binding.linkedAt == 0 {
+		t.Fatalf("new manual link should have a timestamp: %+v", binding)
+	}
 	if err := s.bind(id, target, true); err != nil {
 		t.Fatal(err)
 	}

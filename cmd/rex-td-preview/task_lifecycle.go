@@ -33,6 +33,25 @@ func (m *model) setTaskState(t *task, next taskState) {
 		return
 	}
 	t.state, t.previousState = next, previous
+	if next == done {
+		var latest int64
+		for _, other := range m.tasks {
+			latest = max(latest, other.completionOrder)
+		}
+		t.completionOrder = latest + 1
+	}
+	if m.selected() == t {
+		m.followTask(t)
+	}
+	m.touchTask(t)
+}
+
+func (m *model) cycleTaskState(t *task) {
+	next := (t.state + 1) % (done + 1)
+	if t.state == cancelled {
+		next = t.previousState
+	}
+	m.setTaskState(t, next)
 }
 
 func (m *model) taskCount() int {
@@ -51,6 +70,9 @@ func (m *model) taskCount() int {
 
 func (m *model) selectVisibleTask() {
 	groups := m.taskGroups()
+	if m.focusPreview && !m.archivedView && !m.secondaryOpen[m.homeTab] {
+		groups = slices.DeleteFunc(groups, m.isSecondary)
+	}
 	for _, group := range groups {
 		if slices.Contains(group.rows, m.taskSelection) {
 			return
@@ -72,6 +94,7 @@ func (m *model) changeArchive(t *task) {
 		return
 	}
 	t.archived = archived
+	m.touchTask(t)
 	m.page = listPage
 	if !archived {
 		m.selectTask(t)
@@ -91,6 +114,15 @@ func (m *model) taskBoardKey(key string) bool {
 		if m.page != listPage {
 			return false
 		}
+		if m.focusPreview {
+			if m.homeTab == archiveTab && !m.attention {
+				m.switchHomeTab(m.lastActiveTab)
+			} else {
+				m.switchHomeTab(archiveTab)
+			}
+			m.notice = ""
+			return true
+		}
 		m.archivedView, m.candidatesFocused, m.peek = !m.archivedView, false, false
 		m.notice = ""
 		m.selectVisibleTask()
@@ -102,6 +134,17 @@ func (m *model) taskBoardKey(key string) bool {
 		}
 		m.menuBack, m.menuSelection, m.page = m.page, 0, taskMenuPage
 		m.notice = ""
+	case "s", "e":
+		if t == nil || m.onCandidates() {
+			return false
+		}
+		if key == "s" {
+			m.cycleTaskState(t)
+		} else if m.archivedTask(t) {
+			m.notice = m.text("请先还原任务")
+		} else {
+			m.startTaskEdit(t, taskNextField)
+		}
 	case "x":
 		if t == nil || m.onCandidates() {
 			return false
@@ -128,12 +171,14 @@ type taskAction struct {
 	key, label string
 }
 
+var deleteTaskAction = taskAction{"D", "删除任务"}
+
 func (m *model) taskActions(t *task) []taskAction {
 	if m.archivedTask(t) {
 		if t.archived {
-			return []taskAction{{"a", "还原任务"}}
+			return []taskAction{{"a", "还原任务"}, deleteTaskAction}
 		}
-		return []taskAction{{"h", "打开主任务"}}
+		return []taskAction{{"h", "打开主任务"}, deleteTaskAction}
 	}
 	actions := []taskAction{{"x", "标记完成"}, {"c", "取消任务"}}
 	if t.state >= done {
@@ -144,12 +189,18 @@ func (m *model) taskActions(t *task) []taskAction {
 		actions = actions[1:]
 		actions[0] = taskAction{"c", "重开任务"}
 	}
+	switch t.state {
+	case working:
+		actions = append(actions, taskAction{"s", "暂缓任务"})
+	case paused:
+		actions = append(actions, taskAction{"s", "恢复进行"})
+	}
 	actions = append(actions, taskAction{"u", "上移"}, taskAction{"d", "下移"},
 		taskAction{"e", "改标题"}, taskAction{"n", "编辑下一步"})
 	if t.parentID == 0 {
-		return append(actions, taskAction{"+", "新建子任务"}, taskAction{"l", "关联已有任务"})
+		return append(actions, taskAction{"+", "新建子任务"}, taskAction{"l", "关联已有任务"}, deleteTaskAction)
 	}
-	return append(actions, taskAction{"h", "打开主任务"}, taskAction{"l", "移出主任务"})
+	return append(actions, taskAction{"h", "打开主任务"}, taskAction{"l", "移出主任务"}, deleteTaskAction)
 }
 
 func (m *model) taskMenu(w int) listView {
@@ -201,8 +252,17 @@ func (m *model) taskMenuKey(key string) {
 			next = t.previousState
 		}
 		m.setTaskState(t, next)
+	case "s":
+		if t.state == working {
+			m.setTaskState(t, paused)
+		} else {
+			m.setTaskState(t, working)
+		}
 	case "a":
 		m.changeArchive(t)
+	case "D":
+		m.taskDelete = taskDeletion{id: t.id, title: t.title, hasChildren: len(m.childRows()[t.id]) != 0}
+		m.page = taskDeletePage
 	case "u":
 		m.moveTask(t, -1)
 	case "d":
@@ -263,9 +323,15 @@ func (m *model) sortTaskBoard(selected *task) {
 }
 
 func (m *model) moveTask(t *task, delta int) {
+	waiting := t.state == working && m.boardStatus(t).waiting > 0
 	for i := m.taskSelection + delta; i >= 0 && i < len(m.tasks); i += delta {
 		other := m.tasks[i]
 		if other.archived || t.parentID != other.parentID || t.inPinnedSection() != other.inPinnedSection() {
+			continue
+		}
+		if (t.state == working) != (other.state == working) ||
+			(t.parentID == 0 && (t.state == todo) != (other.state == todo)) ||
+			(t.state == working && waiting != (m.boardStatus(other).waiting > 0)) {
 			continue
 		}
 		first, second := t.order(), other.order()

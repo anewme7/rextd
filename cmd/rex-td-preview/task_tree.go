@@ -27,8 +27,9 @@ type taskEdit struct {
 }
 
 type taskPick struct {
+	paneMove  *paneMove
 	parent    *task
-	query     string
+	query     lineInput
 	selection int
 	back      page
 }
@@ -80,11 +81,11 @@ func (m *model) progressLabel(t *task, children []int) string {
 
 func (m *model) startTaskEdit(t *task, field taskField) {
 	m.taskEdit = &taskEdit{target: t, field: field, back: m.page}
-	m.input = ""
+	m.input.set("")
 	if field == taskTitleField {
-		m.input = t.title
+		m.input.set(t.title)
 	} else if field == taskNextField {
-		m.input = t.note
+		m.input.set(t.note)
 	}
 	m.editing, m.page = true, listPage
 }
@@ -139,11 +140,13 @@ func (m *model) finishTaskEdit(value string) {
 		m.tasks = append(m.tasks, child)
 		m.expanded[t] = true
 		m.sortTaskBoard(child)
+		m.followTask(child)
 		m.showDetails()
-		m.taskEdit, m.editing, m.input = nil, false, ""
+		m.taskEdit, m.editing, m.input = nil, false, lineInput{}
 		return
 	}
-	m.page, m.taskEdit, m.editing, m.input = draft.back, nil, false, ""
+	m.touchTask(t)
+	m.page, m.taskEdit, m.editing, m.input = draft.back, nil, false, lineInput{}
 }
 
 func (m *model) nextTaskID() int64 {
@@ -157,7 +160,7 @@ func (m *model) nextTaskID() int64 {
 func (s *taskStore) addChild(parent int64, title string) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	result, err := s.db.ExecContext(ctx, "INSERT INTO task(title,state,parent_id) SELECT ?,?,id FROM task WHERE id=? AND parent_id IS NULL AND archived=0",
+	result, err := s.db.ExecContext(ctx, "INSERT INTO task(id,title,state,parent_id) SELECT "+nextStoredTaskID+",?,?,id FROM task WHERE id=? AND parent_id IS NULL AND archived=0",
 		title, storedStates[todo], parent)
 	if err != nil {
 		return 0, err
@@ -192,9 +195,16 @@ AND (?=0 OR EXISTS(SELECT 1 FROM task AS parent WHERE parent.id=? AND parent.par
 func (m *model) pickTasks() []*task {
 	var out []*task
 	children := m.childRows()
-	query := strings.ToLower(strings.TrimSpace(m.taskPick.query))
+	pick := m.taskPick
+	query := strings.ToLower(strings.TrimSpace(pick.query.value))
+	if move := pick.paneMove; move != nil && move.from != 0 && query == "" {
+		out = append(out, nil)
+	}
 	for _, t := range m.tasks {
-		if parent := m.taskPick.parent; parent != nil && (t == parent || t.parentID != 0 || t.archived || len(children[t.id]) != 0) {
+		if move := pick.paneMove; move != nil && (t.id == move.from || m.archivedTask(t)) {
+			continue
+		}
+		if parent := pick.parent; parent != nil && (t == parent || t.parentID != 0 || t.archived || len(children[t.id]) != 0) {
 			continue
 		}
 		title := m.taskText(t, t.title)
@@ -215,7 +225,14 @@ func (m *model) startTaskPick(parent *task) {
 
 func (m *model) chooseTask(t *task) {
 	pick := m.taskPick
-	if pick == nil || t == nil {
+	if pick == nil {
+		return
+	}
+	if move := pick.paneMove; move != nil {
+		m.finishPaneMove(*move, t)
+		return
+	}
+	if t == nil {
 		return
 	}
 	if parent := pick.parent; parent != nil {
@@ -235,6 +252,8 @@ func (m *model) chooseTask(t *task) {
 }
 
 func (m *model) selectTask(t *task) {
+	m.boardSuggest, m.boardPane, m.boardSuggestionPane = false, paneIdentity{}, paneIdentity{}
+	m.followTask(t)
 	m.taskSelection = slices.Index(m.tasks, t)
 	m.archivedView, m.candidatesFocused, m.attention, m.focus = m.archivedTask(t), false, false, 0
 	if parent := m.parentOf(t); parent != nil {
@@ -254,8 +273,8 @@ func (m *model) taskPickKey(msg tea.KeyMsg) {
 	case tea.KeyEnter:
 		m.confirmTaskPick()
 	default:
-		if input := editTaskText(pick.query, msg); input != pick.query {
-			pick.query, pick.selection = input, 0
+		if pick.query.update(msg) {
+			pick.selection = 0
 		}
 	}
 }
@@ -272,28 +291,44 @@ func (m *model) taskPicker(w int) listView {
 	if m.taskPick.parent != nil {
 		title = "关联已有任务"
 	}
+	if move := m.taskPick.paneMove; move != nil {
+		title = "移动会话"
+		if move.from == 0 {
+			title = "归入任务"
+		}
+	}
 	v.append(ink.Render(m.text(title)), listHit{})
-	v.append(clip("/ "+m.taskPick.query+"▏", w), listHit{})
+	if move := m.taskPick.paneMove; move != nil {
+		label := strings.Join(nonEmpty(m.paneDisplayTitle(move.pane), appName(move.pane.App)), " · ")
+		v.append(dim.Render(clip(label, w)), listHit{})
+	}
+	v.append("/ "+m.taskPick.query.view(w-2), listHit{})
 	v.append("", listHit{})
 	tasks := m.pickTasks()
 	if len(tasks) == 0 {
 		v.append(dim.Render(m.text("没有匹配的任务")), listHit{})
 	}
 	for i, t := range tasks {
-		title := m.taskText(t, t.title)
-		if parent := m.parentOf(t); parent != nil {
-			title = m.taskText(parent, parent.title) + " / " + title
+		name, state := m.text("移出任务"), ""
+		hit := listHit{task: t}
+		if t == nil {
+			hit.pane = identityOf(m.taskPick.paneMove.pane)
+		} else {
+			name = m.taskText(t, t.title)
+			if parent := m.parentOf(t); parent != nil {
+				name = m.taskText(parent, parent.title) + " / " + name
+			}
+			state = m.text(stateLabels[t.state])
+			if m.archivedTask(t) {
+				state += " · " + m.text("归档")
+			}
 		}
-		state := m.text(stateLabels[t.state])
-		if m.archivedTask(t) {
-			state += " · " + m.text("归档")
-		}
-		row := pair("  "+title, dim.Render(state), w)
+		row := pair("  "+name, dim.Render(state), w)
 		if i == m.taskPick.selection {
 			v.active = len(v.lines)
-			row = focusHighlight.Render(pair("› "+title, state, w))
+			row = focusHighlight.Render(pair("› "+name, state, w))
 		}
-		v.append(row, listHit{task: t})
+		v.append(row, hit)
 	}
 	return v
 }

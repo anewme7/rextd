@@ -1,8 +1,13 @@
 -- Load on a monitored Rex server. Linux uses the kernel's aggregate counters.
--- For macOS, set rex_td_preview_binary to the build on this server before dofile.
+-- macOS uses the same installation as the task board unless explicitly overridden.
+local binary = rex_td_preview_binary or (rextd_root and (rextd_root .. "/rextd"))
+local language = rextd_language or os.getenv("REX_TD_LANG")
+local function text(en, zh)
+  return language == "zh" and zh or en
+end
 rex.action({
   name = "rex_td_cpu_snapshot",
-  title = "rextd CPU counters",
+  title = text("rextd CPU counters", "rextd 处理器计数"),
   run = function()
     local proc = io.open("/proc/stat", "r")
     if proc then
@@ -19,13 +24,13 @@ rex.action({
           Idle = ticks[4] + ticks[5],
         }
       end
-      error("Could not read aggregate /proc/stat CPU counters", 0)
+      error(text("Could not read aggregate /proc/stat CPU counters", "无法从 /proc/stat 读取处理器计数"), 0)
     end
-    if not rex_td_preview_binary then
-      error("Set rex_td_preview_binary to the local rextd executable", 0)
+    if not binary then
+      error(text("Set rextd_root or rex_td_preview_binary on this host", "请为这台主机设置 rextd_root 或 rex_td_preview_binary"), 0)
     end
-    local result, err = rex.exec({ rex_td_preview_binary, "--cpu-snapshot" }, { timeout = 2 })
-    if not result or result.code ~= 0 then error(err or "Could not read native CPU counters", 0) end
+    local result, err = rex.exec({ binary, "--cpu-snapshot" }, { timeout = 2 })
+    if not result or result.code ~= 0 then error(err or text("Could not read native CPU counters", "读取处理器计数失败"), 0) end
     local counters, decode_error = rex.json.decode(result.stdout)
     if not counters then error(decode_error, 0) end
     return counters

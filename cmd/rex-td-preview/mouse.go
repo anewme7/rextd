@@ -7,15 +7,22 @@ import (
 )
 
 type listHit struct {
-	action          string
-	groupID         string
-	task            *task
-	pane            paneIdentity
-	taskArrowEnd    int
-	taskCheckX      int
-	taskMore        bool
-	candidateHeader bool
-	candidate       paneIdentity
+	detailUnassigned bool
+	boardSuggest     bool
+	boardOffer       bool
+	boardMore        bool
+	homeIcon         homeIcon
+	overviewSection  bool
+	sectionTab       taskTab
+	action           string
+	groupID          string
+	task             *task
+	pane             paneIdentity
+	taskArrowEnd     int
+	taskCheckX       int
+	taskMore         bool
+	candidateHeader  bool
+	candidate        paneIdentity
 }
 
 func (m *model) handleMouse(msg tea.MouseMsg) tea.Cmd {

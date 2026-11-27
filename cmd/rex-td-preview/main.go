@@ -6,9 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/term"
 
 	"rex-td/rex"
 )
@@ -28,6 +31,8 @@ func main() {
 		return
 	}
 	demo := flag.Bool("demo", false, "show sample tasks and metrics")
+	host := flag.Int("host", -1, "open Alerts for host 1 to 9 (0 shows all hosts)")
+	startHome := flag.Bool("home", false, "open the task board home")
 	defaultLanguage := english
 	if os.Getenv("REX_TD_LANG") == string(chinese) {
 		defaultLanguage = chinese
@@ -37,11 +42,11 @@ func main() {
 	cpu := flag.Bool("cpu-snapshot", false, "print native CPU counters as JSON")
 	claude := flag.Bool("claude-statusline", false, "read Claude Code status-line JSON from stdin")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [--lang en|zh] [--demo | --version | --cpu-snapshot | --claude-statusline]\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [--lang en|zh] [--demo | --home | --host 0..9 | --version | --cpu-snapshot | --claude-statusline]\n", filepath.Base(os.Args[0]))
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-	if flag.NArg() != 0 {
+	if flag.NArg() != 0 || *host < -1 || *host > 9 {
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -60,7 +65,7 @@ func main() {
 	case *claude:
 		err = recordClaudeStatus(os.Stdin)
 	default:
-		err = run(*demo, uiLanguage)
+		err = run(*demo, *startHome, *host, uiLanguage)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, uiLanguage.text("无法启动 rextd")+":", err)
@@ -68,9 +73,12 @@ func main() {
 	}
 }
 
-func run(demo bool, uiLanguage language) error {
+func run(demo, startHome bool, host int, uiLanguage language) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	requests := make(chan os.Signal, 1)
+	signal.Notify(requests, syscall.SIGUSR1)
+	defer signal.Stop(requests)
 
 	logger := previewLogger()
 	logger.Info("rex-td started", "demo", demo)
@@ -78,6 +86,10 @@ func run(demo bool, uiLanguage language) error {
 
 	m := newModel(demo)
 	m.language, m.focusPreview, m.ctx = uiLanguage, true, ctx
+	m.genericDirs = genericDirectories(os.Getenv("REX_TD_GENERIC_DIRS"))
+	if demo {
+		m.switchHomeTab(nowTab)
+	}
 	if !demo {
 		path, err := taskDBPath()
 		if err != nil {
@@ -93,9 +105,13 @@ func run(demo bool, uiLanguage language) error {
 		if err != nil {
 			return err
 		}
-		m.selectVisibleTask()
-		m.paletteResume, _ = m.store.readPaletteResume()
-		m.applyPaletteResume()
+		m.switchHomeTab(nowTab)
+		m.paletteResume, _ = m.store.readPaletteResume(os.Getenv("REX_CLIENT"))
+		if startHome || host >= 0 {
+			m.paletteResumeApplied = m.paletteResume.revision
+		} else {
+			m.applyPaletteResume()
+		}
 		m.candidateIgnored, err = m.store.loadCandidateIgnores()
 		if err != nil {
 			return err
@@ -113,16 +129,53 @@ func run(demo bool, uiLanguage language) error {
 			m.metricWorkers.Wait()
 		}()
 	}
-	c := rex.Current()
-	if !demo && c.Inside() {
-		var done <-chan struct{}
-		m.ctx, m.rexContext = ctx, c
-		m.updates, done = c.WatchFleet(ctx, logger)
-		defer func() {
-			cancel()
-			<-done
-		}()
+	if !demo {
+		current, err := currentRexContext(ctx)
+		m.rexContext = current
+		if err != nil {
+			logger.Warn("Rex pane location unavailable", "error", err)
+		}
+		if current.Inside() {
+			m.previews, err = rex.NewTerminalPreviews()
+			if err != nil {
+				logger.Warn("Could not reuse Rex preview connections", "error", err)
+			}
+			var done <-chan struct{}
+			m.updates, done = current.WatchFleet(ctx, logger, m.previews)
+			defer func() {
+				cancel()
+				<-done
+				m.previews.Close()
+			}()
+		}
 	}
-	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithFPS(24)).Run()
+	if host >= 0 {
+		m.showHost(host)
+		if host > len(m.feed.Hosts) {
+			m.startupHost = host
+		}
+	}
+	options := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithFPS(24)}
+	termOptions, input := m.homeTerminalOptions()
+	options = append(options, termOptions...)
+	program := tea.NewProgram(m, options...)
+	if input != nil {
+		input.attachProgram(program)
+	}
+	if term.IsTerminal(os.Stdout.Fd()) {
+		_, _ = os.Stdout.WriteString(colorSchemeNotifyOn)
+		defer os.Stdout.WriteString(colorSchemeNotifyOff)
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-requests:
+				program.Send(openHome{})
+			}
+		}
+	}()
+	_, err := program.Run()
 	return err
 }
